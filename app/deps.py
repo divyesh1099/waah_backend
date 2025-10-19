@@ -33,17 +33,27 @@ def has_perm(db: Session, user_id: str, code: str) -> bool:
 
 def require_perm(code: str):
     def _dep(sub: str = Depends(require_auth), db: Session = Depends(get_db)):
-        # collect user's permissions via (User -> UserRole -> Role -> RolePermission -> Permission)
-        perms = (
+        # Admin shortcut: user has a role named ADMIN → allow
+        has_admin = (
+            db.query(Role)
+              .join(UserRole, UserRole.role_id == Role.id)
+              .filter(UserRole.user_id == sub, Role.code == "ADMIN")
+              .first()
+        )
+        if has_admin:
+            return sub
+
+        # Gather user’s permissions via (UserRole → Role → RolePermission → Permission)
+        q = (
             db.query(Permission.code)
               .join(RolePermission, RolePermission.permission_id == Permission.id)
               .join(Role, Role.id == RolePermission.role_id)
               .join(UserRole, UserRole.role_id == Role.id)
               .filter(UserRole.user_id == sub)
-              .all()
         )
-        user_perms = {p[0] for p in perms}
+        user_perms = {row[0] for row in q.all()}
+
         if code not in user_perms:
-            raise HTTPException(403, detail=f"Missing permission: {code}")
+            raise HTTPException(status_code=403, detail=f"Missing permission: {code}")
         return sub
     return _dep

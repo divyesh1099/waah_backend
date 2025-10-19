@@ -8,8 +8,23 @@ from app.db import get_db
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/login", response_model=Token)
-def login(mobile: str, password: str, db: Session = Depends(get_db)):
+def login(
+    mobile: str,
+    password: str | None = None,
+    pin: str | None = None,
+    db: Session = Depends(get_db),
+):
     user = db.query(User).filter(User.mobile == mobile).first()
-    if not user or not verify_pw(user.pass_hash, password):
+    if not user or not bool(user.active):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    ok = False
+    if password:
+        ok = verify_pw(user.pass_hash, password)
+    if not ok and pin and user.pin_hash:
+        ok = verify_pw(user.pin_hash, pin)
+
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
     return Token(access_token=create_token(user.id))

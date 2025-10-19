@@ -1,22 +1,43 @@
+# app/main.py
 # (Ensure package markers)
-# app/__init__.py, app/models/__init__.py, app/routers/__init__.py, app/schemas/__init__.py, app/util/__init__.py
-# all can be empty files to make packages.
+# app/__init__.py, app/models/__init__.py, app/routers/__init__.py,
+# app/schemas/__init__.py, app/util/__init__.py — can be empty files.
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.middleware import RequestIdMiddleware
-from app.routers import auth, menu, orders, sync, kot, admin, settings as settings_router
 from app.db import Base, engine
 from app.config import settings
 
-app = FastAPI(title="Waah API", version="0.1.0")
+# Routers (keep existing)
+from app.routers import auth, menu, orders, sync, kot, admin, users
+from app.routers import settings as settings_router
+from app.routers import backup, reports
+
+# New routers wired for the new models / features
+from app.routers import inventory, shift, printjob, online
+
+app = FastAPI(title="Waah API", version="0.3.0")
+
+# Middlewares
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# Dev: auto-create tables (prod => use Alembic)
+@app.on_event("startup")
+def _startup_create_tables():
+    if settings.APP_ENV == "dev":
+        import app.models  # noqa: F401 (register models with Base)
+        Base.metadata.create_all(bind=engine)
+
+# Keep existing includes
 app.include_router(auth.router)
 app.include_router(menu.router)
 app.include_router(orders.router)
@@ -24,14 +45,15 @@ app.include_router(sync.router)
 app.include_router(kot.router)
 app.include_router(admin.router)
 app.include_router(settings_router.router)
+app.include_router(backup.router)
+app.include_router(reports.router)
 
-@app.on_event("startup")
-def _startup_create_tables():
-    # Import models at startup to register them, then create tables (dev only)
-    if settings.APP_ENV == "dev":
-        import app.models  # noqa: F401
-        Base.metadata.create_all(bind=engine)
-
+# Add the missing ones
+app.include_router(inventory.router)
+app.include_router(shift.router)
+app.include_router(printjob.router)
+app.include_router(online.router)
+app.include_router(users.router)
 
 @app.get("/healthz")
 def healthz():
