@@ -11,7 +11,7 @@ from app.db import Base, engine
 from app.config import settings
 
 # Routers (keep existing)
-from app.routers import auth, menu, orders, sync, kot, admin, users
+from app.routers import auth, dining, menu, orders, sync, kot, admin, users, customers
 from app.routers import settings as settings_router
 from app.routers import backup, reports
 
@@ -54,7 +54,8 @@ app.include_router(shift.router)
 app.include_router(printjob.router)
 app.include_router(online.router)
 app.include_router(users.router)
-
+app.include_router(dining.router)
+app.include_router(customers.router)
 @app.get("/healthz")
 def healthz():
     return {"ok": True}

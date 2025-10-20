@@ -4,7 +4,7 @@ from typing import List
 
 from app.db import get_db
 from app.schemas.menu import MenuCategoryIn, MenuCategoryOut, MenuItemIn, MenuItemOut, VariantIn, VariantOut
-from app.models.core import MenuCategory, MenuItem, ItemVariant
+from app.models.core import MenuCategory, MenuItem, ItemVariant, ModifierGroup, Modifier, ItemModifierGroup
 from app.deps import require_auth, require_perm
 
 router = APIRouter(prefix="/menu", tags=["menu"]) 
@@ -87,3 +87,45 @@ def update_tax(item_id: str, gst_rate: float, tax_inclusive: bool = True, db: Se
     db.commit()
     return {"id": it.id, "gst_rate": float(it.gst_rate), "tax_inclusive": bool(it.tax_inclusive)}
 
+@router.post("/modifier_groups")
+def create_modifier_group(body: dict, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
+    """
+    body: {tenant_id: str, name: str, min_sel: int, max_sel: int}
+    """
+    mg = ModifierGroup(**body)
+    db.add(mg); db.commit(); db.refresh(mg)
+    return {"id": mg.id}
+
+@router.post("/modifiers")
+def create_modifier(body: dict, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
+    """
+    body: {group_id: str, name: str, price_delta: float}
+    """
+    # ensure group exists
+    if not db.get(ModifierGroup, body.get("group_id")):
+        raise HTTPException(404, detail="modifier group not found")
+    m = Modifier(**body)
+    db.add(m); db.commit(); db.refresh(m)
+    return {"id": m.id}
+
+@router.post("/items/{item_id}/modifier_groups")
+def link_item_group(item_id: str, body: dict, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
+    """
+    body: {group_id: str}
+    """
+    if not db.get(MenuItem, item_id):
+        raise HTTPException(404, detail="menu item not found")
+    group_id = body.get("group_id")
+    if not db.get(ModifierGroup, group_id):
+        raise HTTPException(404, detail="modifier group not found")
+
+    exists = (
+        db.query(ItemModifierGroup)
+        .filter(ItemModifierGroup.item_id == item_id, ItemModifierGroup.group_id == group_id)
+        .first()
+    )
+    if not exists:
+        link = ItemModifierGroup(item_id=item_id, group_id=group_id)
+        db.add(link); db.commit()
+        return {"ok": True, "linked": True}
+    return {"ok": True, "linked": False}

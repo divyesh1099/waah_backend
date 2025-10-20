@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from typing import List
 from datetime import datetime, timezone, date
 from decimal import Decimal, ROUND_HALF_UP
@@ -8,7 +10,7 @@ from app.db import get_db
 from app.deps import require_auth
 from app.schemas.orders import OrderIn, OrderOut, OrderItemIn, PaymentIn
 from app.models.core import (
-    Order, OrderStatus, OrderItem, Payment, MenuItem, ItemVariant,
+    AuditLog, Order, OrderStatus, OrderItem, Payment, MenuItem, ItemVariant,
     KitchenTicket, KitchenTicketItem, RecipeBOM, StockMove, StockMoveType,
     RestaurantSettings, Branch, Customer
 )
@@ -178,12 +180,160 @@ def create_invoice(order_id: str, db: Session = Depends(get_db), sub: str = Depe
     o = db.get(Order, order_id)
     if not o:
         raise HTTPException(404, detail="order not found")
-    inv_no = f"INV-{int(datetime.now().timestamp())}"
-    inv = Invoice(order_id=order_id, invoice_no=inv_no, invoice_dt=datetime.now(timezone.utc))
-    # store cashier on invoice if schema supports it
-    if hasattr(inv, "cashier_user_id"):
-        inv.cashier_user_id = sub
-    db.add(inv)
+
+    # Idempotency: if this order already has an invoice, return it
+    existing = db.query(Invoice).filter(Invoice.order_id == order_id).first()
+    if existing:
+        return {"invoice_id": existing.id, "invoice_no": existing.invoice_no}
+
+    # Human-friendly daily sequence: INV-YYYYMMDD-0001 (optionally per branch)
+    today = datetime.now(timezone.utc).date()
+    prefix = f"INV-{today.strftime('%Y%m%d')}"
+    # If you want per-branch sequences, uncomment the join + extra filter:
+    # base_q = db.query(func.count(Invoice.id)).join(Order, Order.id == Invoice.order_id).filter(
+    #     Order.branch_id == o.branch_id, Invoice.invoice_no.like(f"{prefix}-%")
+    # )
+    base_q = db.query(func.count(Invoice.id)).filter(Invoice.invoice_no.like(f"{prefix}-%"))
+    start_n = int(base_q.scalar() or 0)
+
+    attempts = 0
+    while attempts < 3:
+        inv_no = f"{prefix}-{start_n + 1 + attempts:04d}"
+        try:
+            inv = Invoice(
+                order_id=order_id,
+                invoice_no=inv_no,
+                invoice_dt=datetime.now(timezone.utc),
+            )
+            if hasattr(inv, "cashier_user_id"):
+                inv.cashier_user_id = sub
+            db.add(inv)
+            db.commit()
+            db.refresh(inv)
+            return {"invoice_id": inv.id, "invoice_no": inv.invoice_no}
+        except IntegrityError:
+            db.rollback()
+            attempts += 1
+
+    raise HTTPException(409, detail="Could not allocate a unique invoice number")
+
+@router.delete("/{order_id}/items/{order_item_id}")
+def remove_item(
+    order_id: str,
+    order_item_id: str,
+    reason: str | None = None,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    line = db.get(OrderItem, order_item_id)
+    if not line or line.order_id != order_id:
+        raise HTTPException(404, detail="order item not found")
+
+    # soft-delete if schema supports it
+    if hasattr(line, "deleted_at"):
+        line.deleted_at = datetime.now(timezone.utc)
+    if hasattr(line, "void_reason"):
+        line.void_reason = reason
+
+    # reverse stock (BOM) – safe Decimal arithmetic
+    recipes = db.query(RecipeBOM).filter(RecipeBOM.item_id == line.item_id).all()
+    for r in recipes:
+        rq = r.qty if isinstance(r.qty, Decimal) else Decimal(str(r.qty))
+        lq = line.qty if isinstance(line.qty, Decimal) else Decimal(str(line.qty))
+        db.add(
+            StockMove(
+                ingredient_id=r.ingredient_id,
+                type=StockMoveType.ADJUST,   # add back
+                qty_change=(rq * lq),
+                reason=f"Cancel order item {order_item_id}",
+                ref_order_id=order_id,
+            )
+        )
+
+    # audit (optional)
+    if "AuditLog" in globals():
+        db.add(AuditLog(actor_user_id=sub, entity="OrderItem", entity_id=order_item_id, action="CANCEL", reason=reason))
+
     db.commit()
-    db.refresh(inv)
-    return {"invoice_id": inv.id, "invoice_no": inv.invoice_no}
+    return {"ok": True}
+
+@router.post("/{order_id}/items/{order_item_id}/apply_discount")
+def apply_discount(
+    order_id: str,
+    order_item_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    """
+    body: {discount: float, reason?: str}
+    """
+    line = db.get(OrderItem, order_item_id)
+    if not line or line.order_id != order_id:
+        raise HTTPException(404, detail="order item not found")
+
+    disc = body.get("discount", 0.0)
+    # store as Decimal when possible
+    if hasattr(line, "line_discount") and isinstance(getattr(type(line), "line_discount").type.asdecimal, bool):
+        line.line_discount = Decimal(str(disc))
+    else:
+        line.line_discount = float(disc)
+
+    if hasattr(line, "discount_reason"):
+        line.discount_reason = body.get("reason")
+
+    db.commit()
+    return {"ok": True, "line_discount": float(line.line_discount or 0)}
+
+@router.post("/{order_id}/void")
+def void_order(
+    order_id: str,
+    reason: str | None = None,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    o = db.get(Order, order_id)
+    if not o:
+        raise HTTPException(404, detail="order not found")
+
+    # choose a suitable terminal status
+    if hasattr(OrderStatus, "VOID"):
+        o.status = OrderStatus.VOID
+    elif hasattr(OrderStatus, "CANCELLED"):
+        o.status = OrderStatus.CANCELLED
+    else:
+        o.status = OrderStatus.CLOSED
+    o.closed_at = datetime.now(timezone.utc)
+    if hasattr(o, "void_reason"):
+        o.void_reason = reason
+
+    if "AuditLog" in globals():
+        db.add(AuditLog(actor_user_id=sub, entity="Order", entity_id=order_id, action="VOID", reason=reason))
+
+    db.commit()
+    return {"id": o.id, "status": o.status.value}
+
+@router.get("/{order_id}")
+def get_order(order_id: str, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
+    o = db.get(Order, order_id)
+    if not o:
+        raise HTTPException(404, detail="order not found")
+
+    totals = compute_bill(db, order_id)
+    paid = float(sum((p.amount or 0) for p in db.query(Payment).filter(Payment.order_id == order_id).all()))
+    total = float(totals.get("total", 0.0))
+    due = _money(total - paid)
+
+    return {
+        "id": o.id,
+        "status": getattr(o.status, "value", str(o.status)),
+        "tenant_id": getattr(o, "tenant_id", None),
+        "branch_id": getattr(o, "branch_id", None),
+        "order_no": getattr(o, "order_no", None),
+        "totals": {
+            **totals,
+            "paid": _money(paid),
+            "due": due,
+            "total_due": due,  # test expects this alias
+        },
+    }
