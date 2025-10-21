@@ -11,7 +11,7 @@ from app.db import Base, engine
 from app.config import settings
 
 # Routers (keep existing)
-from app.routers import auth, dining, menu, orders, sync, kot, admin, users, customers
+from app.routers import onboard, auth, dining, menu, orders, sync, kot, admin, users, customers
 from app.routers import settings as settings_router
 from app.routers import backup, reports
 
@@ -35,6 +35,7 @@ app.add_middleware(
 )
 
 # Keep existing includes
+app.include_router(onboard.router)
 app.include_router(auth.router)
 app.include_router(menu.router)
 app.include_router(orders.router)

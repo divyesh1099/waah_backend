@@ -63,6 +63,14 @@ class BackupProvider(PyEnum):
     GDRIVE = "GDRIVE"
     AZURE = "AZURE"
 
+# ── Onboarding ───────────────────────────────────────────────────────────────
+class OnboardProgress(Base, IdMixin, TSMMixin):
+    __tablename__ = "onboard_progress"
+    tenant_id: Mapped[str] = mapped_column(String(36), unique=True)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    step: Mapped[str | None] = mapped_column(String(40))    # ADMIN | BRANCH | SETTINGS | PRINTERS | FINISH
+    last_note: Mapped[str | None] = mapped_column(Text)
+
 # ── Identity ────────────────────────────────────────────────────────────────
 class Tenant(Base, IdMixin, TSMMixin):
     __tablename__ = "tenant"
