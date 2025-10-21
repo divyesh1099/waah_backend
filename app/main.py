@@ -20,6 +20,10 @@ from app.routers import inventory, shift, printjob, online
 
 app = FastAPI(title="Waah API", version="0.3.0")
 
+@app.on_event("startup")
+def init_db():
+    Base.metadata.create_all(bind=engine)
+
 # Middlewares
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
@@ -29,13 +33,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Dev: auto-create tables (prod => use Alembic)
-@app.on_event("startup")
-def _startup_create_tables():
-    if settings.APP_ENV == "dev":
-        import app.models  # noqa: F401 (register models with Base)
-        Base.metadata.create_all(bind=engine)
 
 # Keep existing includes
 app.include_router(auth.router)
