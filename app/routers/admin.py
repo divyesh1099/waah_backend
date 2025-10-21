@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.config import settings
@@ -12,9 +12,12 @@ from app.models.core import (
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 @router.post("/dev-bootstrap")
-def dev_bootstrap(db: Session = Depends(get_db)):
+def dev_bootstrap(request: Request, db: Session = Depends(get_db)):
+    # allow in dev, or in prod when a correct secret is presented
     if settings.APP_ENV != "dev":
-        raise HTTPException(403, detail="Not allowed")
+        secret = request.headers.get("X-App-Secret") or request.query_params.get("secret")
+        if not secret or secret != settings.APP_SECRET:
+            raise HTTPException(status_code=403, detail="Not allowed")
 
     # Tenant
     t = db.query(Tenant).first()
