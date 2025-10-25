@@ -10,7 +10,7 @@ from app.db import get_db
 from app.deps import require_auth
 from app.schemas.orders import OrderIn, OrderOut, OrderItemIn, PaymentIn
 from app.models.core import (
-    AuditLog, Order, OrderStatus, OrderItem, Payment, MenuItem, ItemVariant,
+    AuditLog, Invoice, Order, OrderStatus, OrderItem, Payment, MenuItem, ItemVariant,
     KitchenTicket, KitchenTicketItem, RecipeBOM, StockMove, StockMoveType,
     RestaurantSettings, Branch, Customer
 )
@@ -256,26 +256,30 @@ def pay(order_id: str, body: PaymentIn, db: Session = Depends(get_db), sub: str 
 
 
 @router.post("/{order_id}/invoice")
-def create_invoice(order_id: str, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
-    from app.models.core import Invoice
-
+def create_invoice(
+    order_id: str,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
     o = db.get(Order, order_id)
     if not o:
         raise HTTPException(404, detail="order not found")
 
-    # Idempotency: if this order already has an invoice, return it
+    # Idempotency: if invoice already exists, return it
     existing = db.query(Invoice).filter(Invoice.order_id == order_id).first()
     if existing:
-        return {"invoice_id": existing.id, "invoice_no": existing.invoice_no}
+        return {
+            "invoice_id": existing.id,
+            "invoice_no": existing.invoice_no,
+        }
 
-    # Human-friendly daily sequence: INV-YYYYMMDD-0001 (optionally per branch)
+    # Generate invoice_no like INV-YYYYMMDD-0001
     today = datetime.now(timezone.utc).date()
     prefix = f"INV-{today.strftime('%Y%m%d')}"
-    # If you want per-branch sequences, uncomment the join + extra filter:
-    # base_q = db.query(func.count(Invoice.id)).join(Order, Order.id == Invoice.order_id).filter(
-    #     Order.branch_id == o.branch_id, Invoice.invoice_no.like(f"{prefix}-%")
-    # )
-    base_q = db.query(func.count(Invoice.id)).filter(Invoice.invoice_no.like(f"{prefix}-%"))
+
+    base_q = db.query(func.count(Invoice.id)).filter(
+        Invoice.invoice_no.like(f"{prefix}-%")
+    )
     start_n = int(base_q.scalar() or 0)
 
     attempts = 0
@@ -286,13 +290,19 @@ def create_invoice(order_id: str, db: Session = Depends(get_db), sub: str = Depe
                 order_id=order_id,
                 invoice_no=inv_no,
                 invoice_dt=datetime.now(timezone.utc),
+                reprint_count=0,  # first print = not a "reprint" yet
             )
             if hasattr(inv, "cashier_user_id"):
                 inv.cashier_user_id = sub
+
             db.add(inv)
             db.commit()
             db.refresh(inv)
-            return {"invoice_id": inv.id, "invoice_no": inv.invoice_no}
+
+            return {
+                "invoice_id": inv.id,
+                "invoice_no": inv.invoice_no,
+            }
         except IntegrityError:
             db.rollback()
             attempts += 1
