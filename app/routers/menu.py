@@ -39,6 +39,49 @@ def _ts(dt: datetime | None) -> str | None:
     # send ISO8601 that Flutter DateTime.tryParse() can eat
     return dt.isoformat()
 
+def _item_payload(m: MenuItem) -> dict:
+    """Consistent shape for MenuItem back to Flutter."""
+    return {
+        "id": m.id,
+        "tenant_id": m.tenant_id,
+        # no branch_id field on model today
+
+        "name": m.name,
+        "description": m.description,
+        "category_id": m.category_id,
+        "sku": m.sku,
+        "hsn": m.hsn,
+
+        "is_active": bool(m.is_active),
+        "stock_out": bool(m.stock_out),
+        "tax_inclusive": bool(m.tax_inclusive),
+        "gst_rate": _as_float(m.gst_rate) or 0.0,
+
+        "kitchen_station_id": m.kitchen_station_id,
+
+        "created_at": _ts(getattr(m, "created_at", None)),
+        "updated_at": _ts(getattr(m, "updated_at", None)),
+    }
+
+def _variant_payload(v: ItemVariant) -> dict:
+    return {
+        "id": v.id,
+        "item_id": v.item_id,
+        "label": v.label,
+        "mrp": _as_float(v.mrp),
+        "base_price": _as_float(v.base_price) or 0.0,
+        "is_default": bool(v.is_default),
+    }
+
+def _category_payload(c: MenuCategory) -> dict:
+    return {
+        "id": c.id,
+        "tenant_id": c.tenant_id,
+        "branch_id": c.branch_id,
+        "name": c.name,
+        "position": c.position,
+    }
+
 
 # ---------- ITEMS (for POS grid etc) ----------
 
@@ -73,31 +116,7 @@ def list_items(
 
     rows: List[MenuItem] = q.all()
 
-    out = []
-    for m in rows:
-        out.append({
-            "id": m.id,
-            "tenant_id": m.tenant_id,
-            # no branch_id field on model, so we don't emit it
-
-            "name": m.name,
-            "description": m.description,
-            "category_id": m.category_id,
-            "sku": m.sku,
-            "hsn": m.hsn,
-
-            "is_active": bool(m.is_active),
-            "stock_out": bool(m.stock_out),
-            "tax_inclusive": bool(m.tax_inclusive),
-            "gst_rate": _as_float(m.gst_rate) or 0.0,
-
-            "kitchen_station_id": m.kitchen_station_id,
-
-            "created_at": _ts(getattr(m, "created_at", None)),
-            "updated_at": _ts(getattr(m, "updated_at", None)),
-        })
-
-    return out
+    return [_item_payload(m) for m in rows]
 
 
 @router.post("/items", response_model=MenuItemOut)
@@ -106,11 +125,54 @@ def create_item(
     db: Session = Depends(get_db),
     sub: str = Depends(require_auth),
 ):
+    """
+    Create a new item.
+    Used by: repo.createItem(...)
+    """
     it = MenuItem(**body.model_dump())
     db.add(it)
     db.commit()
     db.refresh(it)
     return MenuItemOut(id=it.id, **body.model_dump())
+
+
+# NEW: PATCH /items/{item_id}
+@router.patch("/items/{item_id}")
+def patch_item(
+    item_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Update editable fields on an existing item.
+    Used by the Item Detail page (name, desc, active, stock_out, taxInclusive, gstRate, etc.)
+    """
+
+    it: MenuItem | None = db.get(MenuItem, item_id)
+    if not it or getattr(it, "deleted_at", None) is not None:
+        raise HTTPException(status_code=404, detail="item not found")
+
+    # fields we allow patching from the UI
+    updatable_fields = [
+        "name",
+        "description",
+        "category_id",
+        "sku",
+        "hsn",
+        "is_active",
+        "stock_out",
+        "tax_inclusive",
+        "gst_rate",
+        "kitchen_station_id",
+    ]
+    for fld in updatable_fields:
+        if fld in body:
+            setattr(it, fld, body[fld])
+
+    db.commit()
+    db.refresh(it)
+    return _item_payload(it)
 
 
 @router.delete("/items/{item_id}")
@@ -172,6 +234,10 @@ def update_tax(
     db: Session = Depends(get_db),
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
 ):
+    """
+    Keeps backward-compat with existing frontend which calls updateItemTax().
+    Newer UI may just PATCH /items/{id}, but we keep this endpoint too.
+    """
     it = db.get(MenuItem, item_id)
     if not it or getattr(it, "deleted_at", None) is not None:
         raise HTTPException(404, detail="item not found")
@@ -203,18 +269,7 @@ def list_variants(
         .order_by(ItemVariant.is_default.desc(), ItemVariant.label.asc())
         .all()
     )
-
-    out = []
-    for v in rows:
-        out.append({
-            "id": v.id,
-            "item_id": v.item_id,
-            "label": v.label,
-            "mrp": _as_float(v.mrp),
-            "base_price": _as_float(v.base_price) or 0.0,
-            "is_default": bool(v.is_default),
-        })
-    return out
+    return [_variant_payload(v) for v in rows]
 
 
 @router.post("/variants", response_model=VariantOut)
@@ -223,11 +278,95 @@ def create_variant(
     db: Session = Depends(get_db),
     sub: str = Depends(require_auth),
 ):
-    v = ItemVariant(**body.model_dump())
+    """
+    Create a variant. If is_default=True, unset any existing default for that item.
+    Used by ManageVariantsSheet 'Add' button.
+    """
+    data = body.model_dump()
+
+    item_id = data.get("item_id")
+    make_default = bool(data.get("is_default", False))
+
+    if make_default and item_id:
+        # clear old defaults for this item
+        db.query(ItemVariant).filter(
+            ItemVariant.item_id == item_id
+        ).update({"is_default": False})
+
+    v = ItemVariant(**data)
     db.add(v)
     db.commit()
     db.refresh(v)
-    return VariantOut(id=v.id, **body.model_dump())
+    # NOTE: VariantOut(id=..., ...) should still validate
+    return VariantOut(id=v.id, **data)
+
+
+# NEW: PATCH /variants/{variant_id}
+@router.patch("/variants/{variant_id}")
+def update_variant(
+    variant_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    """
+    Edit label / prices / default flag for a variant.
+    Called by ManageVariantsSheet -> 'Edit'.
+    """
+    v: ItemVariant | None = db.get(ItemVariant, variant_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="variant not found")
+
+    # if caller wants to make THIS variant default, unset all others first
+    if body.get("is_default") is True:
+        db.query(ItemVariant).filter(
+            ItemVariant.item_id == v.item_id
+        ).update({"is_default": False})
+
+    # allowed fields to patch
+    for fld in ["label", "mrp", "base_price", "is_default"]:
+        if fld in body:
+            setattr(v, fld, body[fld])
+
+    db.commit()
+    db.refresh(v)
+    return _variant_payload(v)
+
+
+# NEW: DELETE /variants/{variant_id}
+@router.delete("/variants/{variant_id}")
+def delete_variant(
+    variant_id: str,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    """
+    Delete variant. If it was default, promote another variant as default.
+    Called by ManageVariantsSheet -> trash icon.
+    """
+    v: ItemVariant | None = db.get(ItemVariant, variant_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="variant not found")
+
+    item_id = v.item_id
+    was_default = bool(v.is_default)
+
+    db.delete(v)
+    db.commit()
+
+    if was_default:
+        # pick another variant and mark it default
+        others: List[ItemVariant] = (
+            db.query(ItemVariant)
+            .filter(ItemVariant.item_id == item_id)
+            .order_by(ItemVariant.label.asc())
+            .all()
+        )
+        if others:
+            others[0].is_default = True
+            db.commit()
+
+    return {"ok": True, "id": variant_id}
 
 
 # ---------- CATEGORIES ----------
@@ -272,6 +411,38 @@ def list_categories(
         )
         for r in rows
     ]
+
+
+# NEW: PATCH /categories/{cat_id}
+@router.patch("/categories/{cat_id}", response_model=MenuCategoryOut)
+def patch_category(
+    cat_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Update a category's name / position.
+    Used by Edit Category dialog.
+    """
+    cat: MenuCategory | None = db.get(MenuCategory, cat_id)
+    if not cat or getattr(cat, "deleted_at", None) is not None:
+        raise HTTPException(status_code=404, detail="category not found")
+
+    if "name" in body:
+        cat.name = body["name"]
+    if "position" in body:
+        cat.position = body["position"]
+
+    db.commit()
+    db.refresh(cat)
+    return MenuCategoryOut(
+        id=cat.id,
+        tenant_id=cat.tenant_id,
+        branch_id=cat.branch_id,
+        name=cat.name,
+        position=cat.position,
+    )
 
 
 @router.delete("/categories/{cat_id}")
@@ -328,6 +499,7 @@ def create_modifier(
     db.commit()
     db.refresh(m)
     return {"id": m.id}
+
 
 @router.get("/items/{item_id}/modifiers_full")
 def get_item_modifiers_full(
@@ -395,6 +567,7 @@ def get_item_modifiers_full(
         )
 
     return result
+
 
 @router.post("/items/{item_id}/modifier_groups")
 def link_item_group(
