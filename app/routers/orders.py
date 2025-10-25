@@ -41,6 +41,88 @@ def _q3(x) -> Decimal:
     # use string to avoid float binary artifacts
     return Decimal(str(x)).quantize(Decimal("0.001"))
 
+@router.get("/")
+def list_orders(
+    status: str | None = None,
+    page: int = 1,
+    size: int = 20,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    """
+    List orders (paged) for the logged-in user’s tenant/branch context.
+
+    Query params:
+      - status: "OPEN", "CLOSED", etc. (optional)
+      - page:   1-based page index
+      - size:   page size
+
+    Response shape matches what the Flutter app expects in ApiClient.listPage():
+      { "items": [ { ...order fields... } ], "total": <int> }
+    """
+
+    q = db.query(Order)
+
+    # optional filter by status
+    if status:
+        try:
+            wanted = OrderStatus(status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid status")
+        q = q.filter(Order.status == wanted)
+
+    # simple pagination math
+    if page < 1:
+        page = 1
+    if size < 1:
+        size = 20
+    offset = (page - 1) * size
+
+    total = q.count()
+
+    rows = (
+        q.order_by(
+            Order.opened_at.desc(),
+            Order.order_no.desc(),
+            Order.id.desc(),
+        )
+        .offset(offset)
+        .limit(size)
+        .all()
+    )
+
+    items: list[dict] = []
+    for o in rows:
+        items.append({
+            "id": o.id,
+            "tenant_id": getattr(o, "tenant_id", None),
+            "branch_id": getattr(o, "branch_id", None),
+            "order_no": getattr(o, "order_no", None),
+
+            # enums come back in our Flutter model as strings like "DINE_IN" / "OPEN"
+            "channel": getattr(o.channel, "value", o.channel),
+            "provider": getattr(o.provider, "value", o.provider) if getattr(o, "provider", None) else None,
+            "status": getattr(o.status, "value", o.status),
+
+            "table_id": getattr(o, "table_id", None),
+            "customer_id": getattr(o, "customer_id", None),
+            "opened_by_user_id": getattr(o, "opened_by_user_id", None),
+            "closed_by_user_id": getattr(o, "closed_by_user_id", None),
+
+            "pax": getattr(o, "pax", None),
+            "source_device_id": getattr(o, "source_device_id", None),
+            "note": getattr(o, "note", None),
+
+            # timestamps go out as ISO8601; FastAPI will handle datetime -> str for you
+            "opened_at": getattr(o, "opened_at", None),
+            "closed_at": getattr(o, "closed_at", None),
+        })
+
+    return {
+        "items": items,
+        "total": total,
+    }
+
 
 @router.post("/", response_model=OrderOut)
 def open_order(body: OrderIn, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
