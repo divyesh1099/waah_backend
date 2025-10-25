@@ -224,14 +224,22 @@ class Order(Base, IdMixin, TSMMixin):
     __tablename__ = "order"
     tenant_id: Mapped[str] = mapped_column(String(36))
     branch_id: Mapped[str] = mapped_column(String(36))
-    order_no: Mapped[int]
+    # CHANGED: was int -> now string/varchar so POS can send "POS1-<timestamp>"
+    order_no: Mapped[str] = mapped_column(String(60))
     channel: Mapped[OrderChannel] = mapped_column(Enum(OrderChannel))
-    provider: Mapped[OnlineProvider | None] = mapped_column(Enum(OnlineProvider))
-    status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), default=OrderStatus.OPEN)
+    # allow null if it's not an online aggregator
+    provider: Mapped[OnlineProvider | None] = mapped_column(
+        Enum(OnlineProvider),
+        nullable=True,
+    )
+    status: Mapped[OrderStatus] = mapped_column(
+        Enum(OrderStatus),
+        default=OrderStatus.OPEN,
+    )
     table_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("dining_table.id"))
     customer_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("customer.id"))
-    opened_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("user.id"))  # waiter
-    closed_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("user.id"))  # cashier (requirement #5)
+    opened_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("user.id"))
+    closed_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("user.id"))
     pax: Mapped[int | None]
     source_device_id: Mapped[str | None] = mapped_column(String(36))
     note: Mapped[str | None] = mapped_column(Text)
