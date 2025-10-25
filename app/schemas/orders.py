@@ -8,7 +8,7 @@ OnlineProviderLiteral = Literal["ZOMATO","SWIGGY","CUSTOM"]
 class OrderIn(BaseModel):
     tenant_id: str
     branch_id: str
-    order_no: int
+    order_no: str  # e.g. "POS1-1761384663735"
     channel: OrderChannelLiteral
     provider: Optional[OnlineProviderLiteral] = None
     table_id: Optional[str] = None
@@ -24,6 +24,7 @@ class OrderItemIn(BaseModel):
     order_id: str
     item_id: str
     variant_id: Optional[str] = None
+    parent_line_id: Optional[str] = None
     qty: float
     unit_price: float
     line_discount: float = 0.0
