@@ -329,6 +329,72 @@ def create_modifier(
     db.refresh(m)
     return {"id": m.id}
 
+@router.get("/items/{item_id}/modifiers_full")
+def get_item_modifiers_full(
+    item_id: str,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    """
+    Return all modifier groups linked to this item AND the modifiers in each group.
+
+    Shape is friendly for Flutter:
+    [
+      {
+        "group_id": "...",
+        "name": "Toppings",
+        "required": false,
+        "min_sel": 0,
+        "max_sel": 3,
+        "modifiers": [
+          {"id": "...", "name": "Extra Cheese", "price_delta": 20.0},
+          {"id": "...", "name": "No Onion", "price_delta": 0.0},
+          ...
+        ]
+      },
+      ...
+    ]
+    """
+
+    # 1. find modifier groups linked to this item via ItemModifierGroup
+    groups: List[ModifierGroup] = (
+        db.query(ModifierGroup)
+        .join(
+            ItemModifierGroup,
+            ItemModifierGroup.group_id == ModifierGroup.id,
+        )
+        .filter(ItemModifierGroup.item_id == item_id)
+        .all()
+    )
+
+    result = []
+    for g in groups:
+        # 2. load all modifiers in that group
+        mods: List[Modifier] = (
+            db.query(Modifier)
+            .filter(Modifier.group_id == g.id)
+            .all()
+        )
+
+        result.append(
+            {
+                "group_id": g.id,
+                "name": g.name,
+                "required": bool(getattr(g, "required", False)),
+                "min_sel": getattr(g, "min_sel", 0) or 0,
+                "max_sel": getattr(g, "max_sel", None),
+                "modifiers": [
+                    {
+                        "id": m.id,
+                        "name": m.name,
+                        "price_delta": _as_float(m.price_delta) or 0.0,
+                    }
+                    for m in mods
+                ],
+            }
+        )
+
+    return result
 
 @router.post("/items/{item_id}/modifier_groups")
 def link_item_group(
