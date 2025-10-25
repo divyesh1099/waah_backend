@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
+from datetime import datetime
+from decimal import Decimal
 
 from app.db import get_db
 from app.schemas.menu import MenuCategoryIn, MenuCategoryOut, MenuItemIn, MenuItemOut, VariantIn, VariantOut
@@ -9,6 +11,105 @@ from app.deps import require_auth, require_perm
 
 router = APIRouter(prefix="/menu", tags=["menu"]) 
 
+def _as_float(val: Decimal | float | int | None) -> float | None:
+    # Convert SQLAlchemy Decimal columns (Numeric) into plain float for JSON.
+    if val is None:
+        return None
+    return float(val)
+
+def _ts(dt: datetime | None) -> str | None:
+    # Frontend's models.dart DateTime parser can handle ISO8601 strings.
+    if dt is None:
+        return None
+    return dt.isoformat()
+
+@router.get("/items")
+def list_items(
+    category_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    branch_id: Optional[str] = None,  # accepted for future branch scoping
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    """
+    Returns a list of menu items for POS.
+    Shape matches what the Flutter MenuItem.fromJson() expects.
+    """
+
+    q = db.query(MenuItem)
+
+    # Filter by category if provided
+    if category_id:
+        q = q.filter(MenuItem.category_id == category_id)
+
+    # Tenant scoping (your seed data is using "" right now; we respect passed value)
+    if tenant_id is not None:
+        q = q.filter(MenuItem.tenant_id == tenant_id)
+
+    # NOTE: MenuItem in your model does NOT currently have branch_id,
+    # so `branch_id` is ignored here. We just accept it so the app
+    # can send it without 422.
+
+    rows: List[MenuItem] = q.all()
+
+    out = []
+    for m in rows:
+        out.append({
+            "id": m.id,
+            "tenant_id": m.tenant_id,
+            # branch_id is NOT on MenuItem model right now, but
+            # Flutter's MenuItem has `tenantId` and does NOT require branchId.
+            # So we don't include "branch_id" here.
+
+            "name": m.name,
+            "description": m.description,
+            "category_id": m.category_id,
+            "sku": m.sku,
+            "hsn": m.hsn,
+
+            "is_active": bool(m.is_active),
+            "stock_out": bool(m.stock_out),
+            "tax_inclusive": bool(m.tax_inclusive),
+            "gst_rate": _as_float(m.gst_rate) or 0.0,
+
+            "kitchen_station_id": m.kitchen_station_id,
+
+            # timestamps: models.dart expects created_at/updated_at
+            "created_at": _ts(getattr(m, "created_at", None)),
+            "updated_at": _ts(getattr(m, "updated_at", None)),
+        })
+
+    return out
+
+@router.get("/variants")
+def list_variants(
+    item_id: str,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    """
+    Returns all variants for a given item_id.
+    Matches ItemVariant.fromJson() in Flutter.
+    """
+
+    rows: List[ItemVariant] = (
+        db.query(ItemVariant)
+        .filter(ItemVariant.item_id == item_id)
+        .order_by(ItemVariant.is_default.desc(), ItemVariant.label.asc())
+        .all()
+    )
+
+    out = []
+    for v in rows:
+        out.append({
+            "id": v.id,
+            "item_id": v.item_id,
+            "label": v.label,
+            "mrp": _as_float(v.mrp),
+            "base_price": _as_float(v.base_price) or 0.0,
+            "is_default": bool(v.is_default),
+        })
+    return out
 
 @router.post("/categories", response_model=MenuCategoryOut)
 def create_category(body: MenuCategoryIn, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
