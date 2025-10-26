@@ -1,5 +1,8 @@
 # app/routers/settings.py
-from fastapi import APIRouter, Depends, HTTPException
+import os
+import shutil
+import uuid
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -11,6 +14,7 @@ from app.models.core import (
     KitchenStation,
     ChargeMode,
 )
+from app.config import settings
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -391,3 +395,73 @@ def list_stations(
         }
         for st in stations
     ]
+
+@router.post("/restaurant/logo")
+def upload_restaurant_logo(
+    tenant_id: str = Form(...),
+    branch_id: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Upload a logo image for this tenant+branch.
+    Saves file under MEDIA_ROOT and updates RestaurantSettings.logo_url.
+    Returns { "logo_url": "/media/xxx.png" }
+
+    Frontend flow:
+    1. call this with multipart/form-data
+    2. take returned logo_url
+    3. include that logo_url in /settings/restaurant POST body
+    """
+
+    # basic content-type guard
+    allowed_types = {"image/png", "image/jpeg", "image/jpg"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PNG or JPEG allowed",
+        )
+
+    # build a safe unique filename
+    orig_ext = os.path.splitext(file.filename or "")[1].lower()
+    if orig_ext not in [".png", ".jpg", ".jpeg"]:
+        # fall back based on mime
+        orig_ext = ".png" if file.content_type == "image/png" else ".jpg"
+
+    unique_name = (
+        f"logo_{tenant_id}_{branch_id}_{uuid.uuid4().hex}{orig_ext}"
+    )
+
+    abs_path = os.path.join(settings.MEDIA_ROOT, unique_name)
+    # actually write the uploaded bytes
+    with open(abs_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    public_url = f"{settings.MEDIA_URL_BASE}/{unique_name}"
+
+    # fetch that branch's settings row
+    rs = (
+        db.query(RestaurantSettings)
+        .filter(
+            RestaurantSettings.tenant_id == tenant_id,
+            RestaurantSettings.branch_id == branch_id,
+        )
+        .first()
+    )
+
+    if not rs:
+        # We don't assume defaults for name/gstin/etc here,
+        # because RestaurantSettings.name is probably NOT NULL.
+        # Force caller to upsert /settings/restaurant first.
+        raise HTTPException(
+            status_code=400,
+            detail="Restaurant settings not found. "
+                   "Save /settings/restaurant first, then upload logo.",
+        )
+
+    rs.logo_url = public_url
+    db.commit()
+    db.refresh(rs)
+
+    return {"logo_url": public_url}

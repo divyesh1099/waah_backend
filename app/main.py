@@ -5,6 +5,7 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.middleware import RequestIdMiddleware
 from app.db import Base, engine
@@ -23,6 +24,13 @@ app = FastAPI(title="Waah API", version="0.3.0")
 @app.on_event("startup")
 def init_db():
     Base.metadata.create_all(bind=engine)
+
+# serve uploaded logos
+app.mount(
+    settings.MEDIA_URL_BASE,
+    StaticFiles(directory=settings.MEDIA_ROOT),
+    name="media",
+)
 
 # Middlewares
 app.add_middleware(RequestIdMiddleware)
