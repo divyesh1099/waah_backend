@@ -27,6 +27,63 @@ def _user_has_perm(db: Session, user_id: str, code: str) -> bool:
     return code in {p[0] for p in perms}
 
 
+@router.get("/status", summary="Current shift for this branch")
+def shift_status(
+    branch_id: str,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_auth),
+):
+    """
+    Returns the *active* (unlocked) shift for this branch with movements
+    and calculated expected cash right now.
+    If no open shift, returns {}.
+    """
+
+    s = (
+        db.query(Shift)
+        .filter(
+            Shift.branch_id == branch_id,
+            Shift.locked == False,          # still open
+        )
+        .order_by(Shift.opened_at.desc())
+        .first()
+    )
+
+    if not s:
+        return {}
+
+    # get movements (cash in/out)
+    moves = (
+        db.query(CashMovement)
+        .filter(CashMovement.shift_id == s.id)
+        .order_by(CashMovement.created_at.asc())
+        .all()
+    )
+
+    payins = sum(float(m.amount or 0) for m in moves if m.kind == "PAYIN")
+    payouts = sum(float(m.amount or 0) for m in moves if m.kind == "PAYOUT")
+
+    expected_now = float(s.opening_float or 0) + payins - payouts
+
+    return {
+        "id": s.id,
+        "branch_id": s.branch_id,
+        "opened_at": s.opened_at,
+        "opening_float": float(s.opening_float or 0),
+        "expected_now": expected_now,
+        "is_open_and_unlocked": (not s.locked),
+        "movements": [
+            {
+                "id": m.id,
+                "kind": m.kind,  # PAYIN or PAYOUT
+                "amount": float(m.amount or 0),
+                "reason": m.reason,
+                "ts": m.created_at,
+            }
+            for m in moves
+        ],
+    }
+
 @router.post("/open")
 def open_shift(
     branch_id: str,
