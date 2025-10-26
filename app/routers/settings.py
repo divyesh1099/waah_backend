@@ -35,29 +35,90 @@ def upsert_restaurant(
       - billing_printer_id (optional)
       - invoice_footer
     """
-    tenant_id = body["tenant_id"]
-    branch_id = body["branch_id"]
 
-    # normalize enum-y fields if they come as strings
-    def _coerce_charge_mode(v, default):
+    tenant_id = body.get("tenant_id")
+    branch_id = body.get("branch_id")
+
+    if not tenant_id or not branch_id:
+        raise HTTPException(400, detail="tenant_id and branch_id are required")
+
+    # defensive enum -> ChargeMode
+    def _coerce_charge_mode(v, fallback: "ChargeMode"):
+        """
+        Accepts:
+          - already-a-ChargeMode
+          - "NONE" | "FIXED" | "PERCENT" (any case)
+          - "", None, weird junk
+        Falls back to fallback (usually ChargeMode.NONE).
+        """
         if v is None:
-            return default
-        if isinstance(v, str):
-            return ChargeMode[v.upper()]
-        return v
+            return fallback
 
-    body = {
-        **body,
-        "service_charge_mode": _coerce_charge_mode(
-            body.get("service_charge_mode"),
-            ChargeMode.NONE,
-        ),
-        "packing_charge_mode": _coerce_charge_mode(
-            body.get("packing_charge_mode"),
-            ChargeMode.NONE,
-        ),
+        # already enum?
+        if isinstance(v, ChargeMode):
+            return v
+
+        # bools or numbers are junk for this column, just fallback
+        if isinstance(v, (bool, int, float)):
+            return fallback
+
+        if isinstance(v, str):
+            val = v.strip()
+            if not val:
+                return fallback
+            try:
+                return ChargeMode[val.upper()]
+            except KeyError:
+                return fallback
+
+        # anything else -> fallback
+        return fallback
+
+    # numeric helpers
+    def _to_float(v, default=0.0):
+        try:
+            if v is None or v == "":
+                return default
+            return float(v)
+        except Exception:
+            return default
+
+    service_mode = _coerce_charge_mode(
+        body.get("service_charge_mode"),
+        ChargeMode.NONE,
+    )
+    packing_mode = _coerce_charge_mode(
+        body.get("packing_charge_mode"),
+        ChargeMode.NONE,
+    )
+
+    service_val = _to_float(body.get("service_charge_value"), 0.0)
+    packing_val = _to_float(body.get("packing_charge_value"), 0.0)
+
+    # sanitize booleans with sane defaults
+    print_fssai = bool(body.get("print_fssai_on_invoice", False))
+    gst_inclusive = bool(body.get("gst_inclusive_default", False))
+
+    update_data = {
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "name": body.get("name"),
+        "logo_url": body.get("logo_url"),
+        "address": body.get("address"),
+        "phone": body.get("phone"),
+        "gstin": body.get("gstin"),
+        "fssai": body.get("fssai"),
+        "print_fssai_on_invoice": print_fssai,
+        "gst_inclusive_default": gst_inclusive,
+        "billing_printer_id": body.get("billing_printer_id"),
+        "invoice_footer": body.get("invoice_footer"),
+        "service_charge_mode": service_mode,
+        "service_charge_value": service_val,
+        "packing_charge_mode": packing_mode,
+        "packing_charge_value": packing_val,
     }
 
+    # upsert
     rs = (
         db.query(RestaurantSettings)
         .filter(
@@ -67,10 +128,10 @@ def upsert_restaurant(
         .first()
     )
     if not rs:
-        rs = RestaurantSettings(**body)
+        rs = RestaurantSettings(**update_data)
         db.add(rs)
     else:
-        for k, v in body.items():
+        for k, v in update_data.items():
             setattr(rs, k, v)
 
     db.commit()
