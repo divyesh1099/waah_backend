@@ -26,19 +26,19 @@ def create_user(
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
-    body shape:
+    body:
     {
-      "tenant_id": "...",        # optional, defaults to caller's tenant
+      "tenant_id": "...",          # optional, defaults to caller's tenant
       "name": "Alice",
       "mobile": "9999",
       "email": "alice@example.com",
-      "password": "secret",      # optional, defaults to "admin"
-      "pin": "1234",             # optional
-      "roles": ["ADMIN","CASHIER"]   # optional
+      "password": "secret",        # optional, defaults to "admin"
+      "pin": "1234",               # optional
+      "roles": ["ADMIN","CASHIER"] # optional
     }
     """
 
-    # 1) Resolve tenant_id (default to caller's tenant)
+    # 1) resolve tenant_id (fallback = caller's tenant)
     tid = (body.get("tenant_id") or "").strip()
     if not tid:
         me = db.get(User, sub)
@@ -46,22 +46,26 @@ def create_user(
             raise HTTPException(400, detail="tenant_id is required")
         tid = me.tenant_id
 
-    # 2) Validate tenant exists
+    # 2) tenant must exist
     if not db.get(Tenant, tid):
         raise HTTPException(400, detail=f"Invalid tenant_id: {tid}")
 
-    # 3) uniqueness check for mobile in that tenant
+    # 3) check mobile uniqueness inside tenant
     mobile = body.get("mobile")
     if mobile:
         dup = (
             db.query(User)
-            .filter(User.tenant_id == tid, User.mobile == mobile, User.deleted_at.is_(None))
+            .filter(
+                User.tenant_id == tid,
+                User.mobile == mobile,
+                User.deleted_at.is_(None),
+            )
             .first()
         )
         if dup:
             raise HTTPException(409, detail="Mobile already exists")
 
-    # 4) Create user
+    # 4) create the user
     u = User(
         tenant_id=tid,
         name=body["name"],
@@ -74,9 +78,9 @@ def create_user(
         u.pin_hash = hash_pw(body["pin"])
 
     db.add(u)
-    db.flush()  # u.id available
+    db.flush()  # now u.id is available
 
-    # 5) Attach / create roles for same tenant
+    # 5) attach / create roles in same tenant
     for rcode in body.get("roles", []):
         r = (
             db.query(Role)
@@ -101,7 +105,6 @@ def list_users(
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
-    Returns a list like:
     [
       {
         "id": "...",
@@ -161,7 +164,7 @@ def assign_roles(
         raise HTTPException(404, detail="user not found")
 
     for code in body.get("roles", []):
-        # role must be same tenant as user
+        # role must share tenant with user
         r = (
             db.query(Role)
             .filter(Role.tenant_id == u.tenant_id, Role.code == code)
@@ -220,20 +223,68 @@ def list_roles(
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
-    Returns:
+    Returns a lightweight view used in RolesPage list:
     [
       {"id": "...", "tenant_id": "...", "code": "ADMIN"},
       ...
     ]
+
+    (Frontend's RoleInfo.fromListJson can default permissions=[] for these.)
     """
     q = db.query(Role)
     if tenant_id:
         q = q.filter(Role.tenant_id == tenant_id)
+
     rows = q.order_by(Role.code.asc()).all()
+
     return [
-        {"id": r.id, "tenant_id": r.tenant_id, "code": r.code}
+        {
+            "id": r.id,
+            "tenant_id": r.tenant_id,
+            "code": r.code,
+            # we intentionally don't join permissions here
+            # to keep this list fast/light.
+        }
         for r in rows
     ]
+
+
+@router.get(
+    "/roles/{role_id}",
+    summary="Fetch single role including its permissions[]",
+)
+def get_role(
+    role_id: str,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Returns full detail for RoleDetailPage:
+    {
+      "id": "...",
+      "tenant_id": "...",
+      "code": "CASHIER",
+      "permissions": ["SETTINGS_EDIT", "REPRINT", ...]
+    }
+    """
+    r = db.get(Role, role_id)
+    if not r:
+        raise HTTPException(404, detail="role not found")
+
+    perm_rows = (
+        db.query(Permission.code)
+        .join(RolePermission, RolePermission.permission_id == Permission.id)
+        .filter(RolePermission.role_id == r.id)
+        .all()
+    )
+    perms = [code for (code,) in perm_rows]
+
+    return {
+        "id": r.id,
+        "tenant_id": r.tenant_id,
+        "code": r.code,
+        "permissions": perms,
+    }
 
 
 @router.post("/roles", summary="Create a role in a tenant")
@@ -246,12 +297,16 @@ def create_role(
     code = body["code"]
 
     # enforce uniqueness per tenant
-    if (
+    exists = (
         db.query(Role)
         .filter(Role.tenant_id == tid, Role.code == code)
         .first()
-    ):
-        raise HTTPException(409, detail="role code already exists for this tenant")
+    )
+    if exists:
+        raise HTTPException(
+            status_code=409,
+            detail="role code already exists for this tenant",
+        )
 
     r = Role(tenant_id=tid, code=code)
     db.add(r)
@@ -266,7 +321,6 @@ def list_permissions(
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
-    Returns:
     [
       {"id": "...", "code": "SETTINGS_EDIT", "description": "..."},
       ...
@@ -283,7 +337,10 @@ def list_permissions(
     ]
 
 
-@router.post("/roles/{role_id}/grant", summary="Grant permissions to a role")
+@router.post(
+    "/roles/{role_id}/grant",
+    summary="Grant permissions to a role",
+)
 def grant_permissions(
     role_id: str,
     body: dict,  # { "permissions": ["SETTINGS_EDIT","REPRINT"] }
@@ -298,22 +355,22 @@ def grant_permissions(
     if not codes:
         return {"id": r.id, "granted": 0}
 
-    # preload existing permissions
+    # preload Permission rows for those codes
     existing = {
         p.code: p
-        for p in db.query(Permission).filter(
-            Permission.code.in_(list(codes))
-        )
+        for p in db.query(Permission)
+        .filter(Permission.code.in_(list(codes)))
+        .all()
     }
 
-    # create any missing Permission rows on-the-fly
+    # create any brand new Permission rows
     for c in codes - set(existing.keys()):
         p = Permission(code=c, description=c.title())
         db.add(p)
         db.flush()
         existing[c] = p
 
-    # link role -> each permission
+    # link role -> permission
     count = 0
     for c, p in existing.items():
         already = (
@@ -326,7 +383,10 @@ def grant_permissions(
         )
         if not already:
             db.add(
-                RolePermission(role_id=r.id, permission_id=p.id)
+                RolePermission(
+                    role_id=r.id,
+                    permission_id=p.id,
+                )
             )
             count += 1
 
@@ -334,7 +394,10 @@ def grant_permissions(
     return {"id": r.id, "granted": count}
 
 
-@router.delete("/roles/{role_id}/revoke/{perm_code}", summary="Revoke a permission from a role")
+@router.delete(
+    "/roles/{role_id}/revoke/{perm_code}",
+    summary="Revoke a permission from a role",
+)
 def revoke_permission(
     role_id: str,
     perm_code: str,
