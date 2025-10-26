@@ -42,14 +42,13 @@ def upsert_restaurant(
     if not tenant_id or not branch_id:
         raise HTTPException(400, detail="tenant_id and branch_id are required")
 
-    # defensive enum -> ChargeMode
     def _coerce_charge_mode(v, fallback: "ChargeMode"):
         """
         Accepts:
-          - already-a-ChargeMode
-          - "NONE" | "FIXED" | "PERCENT" (any case)
-          - "", None, weird junk
-        Falls back to fallback (usually ChargeMode.NONE).
+        - ChargeMode enum instance
+        - strings like "NONE", "FLAT", "FIXED", "PERCENT" (any case)
+        - None / '' -> fallback
+        Maps legacy "FIXED" -> "FLAT".
         """
         if v is None:
             return fallback
@@ -58,16 +57,21 @@ def upsert_restaurant(
         if isinstance(v, ChargeMode):
             return v
 
-        # bools or numbers are junk for this column, just fallback
+        # weird junk like bool/number -> fallback
         if isinstance(v, (bool, int, float)):
             return fallback
 
         if isinstance(v, str):
-            val = v.strip()
-            if not val:
+            key = v.strip().upper()
+            if not key:
                 return fallback
+
+            # backward compat: old frontend used "FIXED", backend enum is "FLAT"
+            if key == "FIXED":
+                key = "FLAT"
+
             try:
-                return ChargeMode[val.upper()]
+                return ChargeMode[key]
             except KeyError:
                 return fallback
 
