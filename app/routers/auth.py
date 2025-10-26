@@ -54,17 +54,8 @@ def me(
 ):
     """
     Return the logged-in user's profile + RBAC info.
-    Shape is what Flutter's MeInfo expects.
-    {
-      "id": "...",
-      "tenant_id": "...",
-      "name": "...",
-      "mobile": "...",
-      "email": "...",
-      "active": true,
-      "roles": ["ADMIN", "CASHIER"],
-      "permissions": ["SETTINGS_EDIT", "REPRINT", ...]
-    }
+    We ALSO include a default branch_id now,
+    so the POS / settings UI knows which branch it's working on.
     """
     u: User | None = db.get(User, sub)
     if not u or not bool(u.active):
@@ -93,9 +84,20 @@ def me(
         )
     }
 
+    # NEW PART: pick a "current" branch for this tenant.
+    # For now, just grab the first branch belonging to this tenant.
+    from app.models.core import Branch  # import here to avoid circulars
+    branch = (
+        db.query(Branch)
+        .filter(Branch.tenant_id == u.tenant_id)
+        .first()
+    )
+    branch_id = branch.id if branch else None
+
     return {
         "id": u.id,
         "tenant_id": u.tenant_id,
+        "branch_id": branch_id,              # <-- NEW FIELD
         "name": u.name,
         "mobile": u.mobile,
         "email": u.email,
