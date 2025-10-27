@@ -6,7 +6,7 @@ import httpx
 from decimal import Decimal, ROUND_HALF_UP
 
 from app.db import get_db
-from app.deps import require_auth  # phase-1: allow any logged-in cashier to print
+from app.deps import AuthCtx, require_auth  # phase-1: allow any logged-in cashier to print
 from app.models.core import (
     AuditLog,
     Order,
@@ -20,6 +20,7 @@ from app.models.core import (
     RestaurantSettings,
     Printer,
     DiningTable,
+    Branch,
 )
 from app.services.billing import compute_bill
 
@@ -241,6 +242,19 @@ def _build_print_payload(
     return payload
 
 
+# -------- NEW: multi-tenant/branch guards ----------------------------------
+
+def _ensure_order_access(db: Session, order_id: str, ctx: AuthCtx) -> Order:
+    order = db.get(Order, order_id)
+    if not order:
+        raise HTTPException(404, detail="order not found")
+    if hasattr(order, "tenant_id") and order.tenant_id != ctx.tenant_id:
+        raise HTTPException(404, detail="order not found")
+    if ctx.branch_id and hasattr(order, "branch_id") and order.branch_id != ctx.branch_id:
+        raise HTTPException(404, detail="order not found")
+    return order
+
+
 # --- routes ----------------------------------------------------------------
 
 @router.post("/bill/{order_id}")
@@ -248,7 +262,7 @@ async def print_bill(
     order_id: str,
     reason: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Print a pre-invoice bill / customer check.
@@ -256,9 +270,7 @@ async def print_bill(
     Phase-1: any logged-in user can hit this (cashier, waiter, etc.).
     AuditLog records who did it.
     """
-    order = db.get(Order, order_id)
-    if not order:
-        raise HTTPException(404, detail="order not found")
+    order = _ensure_order_access(db, order_id, ctx)
 
     rs, printer = _get_billing_printer(
         db,
@@ -283,7 +295,7 @@ async def print_bill(
     # Audit (who printed a bill)
     db.add(
         AuditLog(
-            actor_user_id=sub,
+            actor_user_id=ctx.user_id,
             entity="Order",
             entity_id=order_id,
             action="PRINT_BILL",
@@ -300,7 +312,7 @@ async def print_invoice(
     invoice_id: str,
     reason: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Print a tax invoice (final bill).
@@ -313,9 +325,7 @@ async def print_invoice(
     if not inv:
         raise HTTPException(404, detail="invoice not found")
 
-    order = db.get(Order, inv.order_id)
-    if not order:
-        raise HTTPException(404, detail="linked order not found")
+    order = _ensure_order_access(db, inv.order_id, ctx)
 
     rs, printer = _get_billing_printer(
         db,
@@ -343,7 +353,7 @@ async def print_invoice(
 
     db.add(
         AuditLog(
-            actor_user_id=sub,
+            actor_user_id=ctx.user_id,
             entity="Invoice",
             entity_id=invoice_id,
             action="PRINT_INVOICE",
@@ -364,20 +374,28 @@ async def open_drawer(
     tenant_id: str | None = None,
     branch_id: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Pop the cash drawer connected to the BILLING printer.
     - If tenant_id/branch_id is provided, we use that branch's billing printer.
-    - Otherwise we fall back to "first RestaurantSettings that has a billing_printer_id",
-      which keeps your old behavior working.
+    - Otherwise prefer ctx.branch_id; finally fall back to "first RestaurantSettings that
+      has a billing_printer_id", which keeps your old behavior working.
     """
     rs = None
     printer = None
 
-    if branch_id:
-        # Try branch-specific (preferred)
-        rs, printer = _get_billing_printer(db, tenant_id, branch_id)
+    # Prefer branch from context when not explicitly provided
+    eff_tenant_id = tenant_id or ctx.tenant_id
+    eff_branch_id = branch_id or ctx.branch_id
+
+    if eff_branch_id:
+        # verify branch belongs to tenant
+        br = db.get(Branch, eff_branch_id)
+        if (not br) or (hasattr(br, "tenant_id") and br.tenant_id != eff_tenant_id):
+            raise HTTPException(404, detail="branch not found")
+
+        rs, printer = _get_billing_printer(db, eff_tenant_id, eff_branch_id)
 
     if not rs or not printer:
         # Fallback: old behavior = "first configured billing_printer"

@@ -6,8 +6,8 @@ from typing import List, Optional
 from datetime import datetime
 
 from app.db import get_db
-from app.deps import require_auth, require_perm
-from app.models.core import DiningTable  # model with IdMixin/TSMMixin
+from app.deps import AuthCtx, require_auth, require_perm
+from app.models.core import DiningTable, Branch  # model with IdMixin/TSMMixin
 
 router = APIRouter(prefix="/dining", tags=["dining"])
 
@@ -32,6 +32,37 @@ def _row_from_table(t: DiningTable) -> dict:
     }
 
 
+def _effective_branch_id(db: Session, ctx: AuthCtx, provided_branch_id: Optional[str]) -> str:
+    """
+    Decide which branch_id to use:
+      - If token has ctx.branch_id => use it.
+      - Else, require caller to provide branch_id and verify it belongs to ctx.tenant_id.
+    """
+    bid = ctx.branch_id or (provided_branch_id or "").strip()
+    if not bid:
+        raise HTTPException(status_code=400, detail="branch not selected")
+    br = db.get(Branch, bid)
+    if (not br) or br.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="branch not found")
+    return bid
+
+
+def _ensure_table_access(db: Session, table_id: str, ctx: AuthCtx) -> DiningTable:
+    t = db.get(DiningTable, table_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="table not found")
+    # If soft-deleted, hide as 404
+    if hasattr(t, "deleted_at") and getattr(t, "deleted_at") is not None:
+        raise HTTPException(status_code=404, detail="table not found")
+    # Verify the table's branch belongs to caller's tenant and (if present) matches caller's branch
+    br = db.get(Branch, t.branch_id) if getattr(t, "branch_id", None) else None
+    if (not br) or br.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="table not found")
+    if ctx.branch_id and br.id != ctx.branch_id:
+        raise HTTPException(status_code=404, detail="table not found")
+    return t
+
+
 # ------------------------------------------------------------------
 # POST /dining/tables  -> create new table
 # ------------------------------------------------------------------
@@ -39,7 +70,7 @@ def _row_from_table(t: DiningTable) -> dict:
 def create_table(
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     body can include:
@@ -56,6 +87,10 @@ def create_table(
 
     if not payload.get("code"):
         raise HTTPException(400, detail="code is required")
+
+    # ensure branch belongs to ctx.tenant; default to ctx.branch if not provided
+    if "branch_id" in model_cols:
+        payload["branch_id"] = _effective_branch_id(db, ctx, payload.get("branch_id"))
 
     # seat default if column exists
     if "seats" in model_cols:
@@ -81,7 +116,7 @@ def create_table(
 def list_tables(
     branch_id: Optional[str] = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Returns active (not soft-deleted) dining tables.
@@ -92,14 +127,17 @@ def list_tables(
     Flutter expects a plain List[ {id, branch_id, code, zone, seats} ].
     """
 
+    # decide effective branch (token-scoped or provided)
+    bid = _effective_branch_id(db, ctx, branch_id)
+
     q = db.query(DiningTable)
 
     # If TSMMixin gave you deleted_at, hide soft-deleted
     if hasattr(DiningTable, "deleted_at"):
         q = q.filter(DiningTable.deleted_at.is_(None))
 
-    if branch_id is not None:
-        q = q.filter(DiningTable.branch_id == branch_id)
+    # enforce branch
+    q = q.filter(DiningTable.branch_id == bid)
 
     rows: List[DiningTable] = (
         q.order_by(DiningTable.code.asc())  # nice stable ordering
@@ -116,7 +154,7 @@ def list_tables(
 def delete_table(
     table_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
     Soft-delete a table by stamping deleted_at.
@@ -124,13 +162,7 @@ def delete_table(
     Frontend can call this if you add `catalogRepo.deleteTable(...)` later.
     """
 
-    t: DiningTable | None = db.get(DiningTable, table_id)
-    if not t:
-        raise HTTPException(status_code=404, detail="table not found")
-
-    # already deleted? we'll just 404 to match category behavior
-    if hasattr(t, "deleted_at") and getattr(t, "deleted_at") is not None:
-        raise HTTPException(status_code=404, detail="table not found")
+    t = _ensure_table_access(db, table_id, ctx)
 
     # mark soft delete if model supports it, else hard delete
     if hasattr(t, "deleted_at"):

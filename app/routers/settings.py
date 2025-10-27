@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps import require_auth, require_perm
+from app.deps import AuthCtx, require_auth, require_perm
 from app.models.core import (
     RestaurantSettings,
     Printer,
@@ -19,6 +19,19 @@ from app.config import settings
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
+def _assert_ctx_matches(ctx: AuthCtx, tenant_id: str | None, branch_id: str | None):
+    """
+    Enforce that provided tenant_id/branch_id lines up with the auth context.
+    If ctx is more specific, mismatch results in 404 (hide existence).
+    """
+    if not tenant_id or not branch_id:
+        raise HTTPException(400, detail="tenant_id and branch_id are required")
+    if ctx.tenant_id and ctx.tenant_id != tenant_id:
+        raise HTTPException(404, detail="not found")
+    if ctx.branch_id and ctx.branch_id != branch_id:
+        raise HTTPException(404, detail="not found")
+
+
 # ------------------------
 # RESTAURANT SETTINGS
 # ------------------------
@@ -28,6 +41,7 @@ def upsert_restaurant(
     body: dict,
     db: Session = Depends(get_db),
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Creates or updates RestaurantSettings (one row per tenant+branch).
@@ -43,8 +57,7 @@ def upsert_restaurant(
     tenant_id = body.get("tenant_id")
     branch_id = body.get("branch_id")
 
-    if not tenant_id or not branch_id:
-        raise HTTPException(400, detail="tenant_id and branch_id are required")
+    _assert_ctx_matches(ctx, tenant_id, branch_id)
 
     def _coerce_charge_mode(v, fallback: "ChargeMode"):
         """
@@ -153,11 +166,14 @@ def get_restaurant(
     branch_id: str,
     db: Session = Depends(get_db),
     sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Fetch RestaurantSettings for a tenant+branch so the frontend
     can display / edit settings and know the billing_printer_id.
     """
+    _assert_ctx_matches(ctx, tenant_id, branch_id)
+
     rs = (
         db.query(RestaurantSettings)
         .filter(
@@ -200,11 +216,14 @@ def list_printers(
     branch_id: str,
     db: Session = Depends(get_db),
     sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     List all printers for that branch, so UI (or you via Postman)
     can pick which one should bill.
     """
+    _assert_ctx_matches(ctx, tenant_id, branch_id)
+
     printers = (
         db.query(Printer)
         .filter(
@@ -243,6 +262,7 @@ def add_printer(
     body: dict,
     db: Session = Depends(get_db),
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Create a printer.
@@ -256,6 +276,10 @@ def add_printer(
       cash_drawer_code (str)
     """
     data = dict(body)
+
+    tenant_id = data.get("tenant_id")
+    branch_id = data.get("branch_id")
+    _assert_ctx_matches(ctx, tenant_id, branch_id)
 
     # coerce type string -> PrinterType enum
     if isinstance(data.get("type"), str):
@@ -301,6 +325,7 @@ def update_printer(
     body: dict,
     db: Session = Depends(get_db),
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Update printer info. You can also flip is_default=true here
@@ -309,6 +334,9 @@ def update_printer(
     p = db.get(Printer, printer_id)
     if not p:
         raise HTTPException(404, detail="printer not found")
+
+    # guard access by ctx
+    _assert_ctx_matches(ctx, getattr(p, "tenant_id", None), getattr(p, "branch_id", None))
 
     updatable = {
         "name",
@@ -358,11 +386,16 @@ def add_station(
     body: dict,
     db: Session = Depends(get_db),
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Create a kitchen station and (optionally) link it to a printer
     so KOTs route correctly.
     """
+    tenant_id = body.get("tenant_id")
+    branch_id = body.get("branch_id")
+    _assert_ctx_matches(ctx, tenant_id, branch_id)
+
     s = KitchenStation(**body)
     db.add(s)
     db.commit()
@@ -376,7 +409,10 @@ def list_stations(
     branch_id: str,
     db: Session = Depends(get_db),
     sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
+    _assert_ctx_matches(ctx, tenant_id, branch_id)
+
     stations = (
         db.query(KitchenStation)
         .filter(
@@ -403,6 +439,7 @@ def upload_restaurant_logo(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Upload a logo image for this tenant+branch.
@@ -414,6 +451,8 @@ def upload_restaurant_logo(
     2. take returned logo_url
     3. include that logo_url in /settings/restaurant POST body
     """
+
+    _assert_ctx_matches(ctx, tenant_id, branch_id)
 
     # basic content-type guard
     allowed_types = {"image/png", "image/jpeg", "image/jpg"}

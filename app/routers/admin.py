@@ -59,16 +59,20 @@ def dev_bootstrap(request: Request, db: Session = Depends(get_db)):
         .first()
     )
     if not billing_pr:
-        billing_pr = Printer(
-            tenant_id=t.id,
-            branch_id=b.id,
-            name="Billing Printer",
-            type=PrinterType.BILLING,
-            is_default=True,
-            connection_url="http://localhost:9100/agent",  # adjust for your agent
-            cash_drawer_enabled=True,
-            cash_drawer_code="PULSE_2_100",
-        )
+        p_data = {
+            "tenant_id": t.id,
+            "branch_id": b.id,
+            "name": "Billing Printer",
+            "type": PrinterType.BILLING,
+            "is_default": True,
+            "connection_url": "http://localhost:9100/agent",  # adjust for your agent
+        }
+        # only set these if columns exist (older schemas won't have them)
+        if "cash_drawer_enabled" in Printer.__table__.columns:
+            p_data["cash_drawer_enabled"] = True
+            p_data["cash_drawer_code"] = "PULSE_2_100"
+
+        billing_pr = Printer(**p_data)
         db.add(billing_pr); db.flush()
 
     kitchen_pr = (
@@ -123,9 +127,13 @@ def dev_bootstrap(request: Request, db: Session = Depends(get_db)):
             billing_printer_id=billing_pr.id,
             invoice_footer="Thank you! Visit again.",
         )
-        db.add(rs)
+        db.add(rs); db.flush()
+    else:
+        # if settings already exist but billing printer isn't wired, wire it now
+        if not getattr(rs, "billing_printer_id", None):
+            rs.billing_printer_id = billing_pr.id
 
-    # Minimal RBAC bootstrap so other routers work (REPRINT/VOID/SETTINGS_EDIT/MANAGER_APPROVE)
+    # Minimal RBAC bootstrap so other routers work
     admin_role = (
         db.query(Role).filter(Role.tenant_id == t.id, Role.code == "ADMIN").first()
     )
@@ -133,7 +141,7 @@ def dev_bootstrap(request: Request, db: Session = Depends(get_db)):
         admin_role = Role(tenant_id=t.id, code="ADMIN")
         db.add(admin_role); db.flush()
 
-    needed_perms = ["DISCOUNT", "VOID", "REPRINT", "SETTINGS_EDIT", "MANAGER_APPROVE"]
+    needed_perms = ["DISCOUNT", "VOID", "REPRINT", "SETTINGS_EDIT", "MANAGER_APPROVE", "SHIFT_CLOSE"]
     existing = {p.code: p for p in db.query(Permission).filter(Permission.code.in_(needed_perms)).all()}
     for code in needed_perms:
         perm = existing.get(code)

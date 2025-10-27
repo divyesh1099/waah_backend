@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import httpx
 
 from app.db import get_db
-from app.deps import require_auth, require_perm
+from app.deps import AuthCtx, require_auth, require_perm
 from app.models.core import (
     AuditLog,
     KitchenTicket,
@@ -21,6 +21,7 @@ from app.models.core import (
     DiningTable,
     User,
     Printer,
+    MenuCategory,
 )
 
 router = APIRouter(prefix="/kot", tags=["kot"])
@@ -39,7 +40,47 @@ async def _post_agent(url: str, payload: dict):
         pass
 
 
-def _gather_station_lines(db: Session, order_id: str, station_id: str | None):
+def _ensure_order_access(db: Session, order_id: str, ctx: AuthCtx) -> Order:
+    o = db.get(Order, order_id)
+    if not o:
+        raise HTTPException(status_code=404, detail="order not found")
+    # tenant scope (if model has tenant_id)
+    tenant_id = getattr(o, "tenant_id", None)
+    if tenant_id is not None and tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="order not found")
+    # branch scope (if model has branch_id and ctx has one)
+    if ctx.branch_id:
+        order_branch = getattr(o, "branch_id", None)
+        if order_branch is not None and order_branch != ctx.branch_id:
+            raise HTTPException(status_code=404, detail="order not found")
+    return o
+
+
+def _ensure_ticket_access(db: Session, ticket_id: str, ctx: AuthCtx) -> KitchenTicket:
+    t = db.get(KitchenTicket, ticket_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="ticket not found")
+    _ensure_order_access(db, t.order_id, ctx)
+    return t
+
+
+def _ensure_station_access(db: Session, station_id: str | None, ctx: AuthCtx) -> None:
+    if not station_id:
+        return
+    st = db.get(KitchenStation, station_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="station not found")
+    # tenant/branch checks if present on model
+    st_tenant = getattr(st, "tenant_id", None)
+    if st_tenant is not None and st_tenant != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="station not found")
+    if ctx.branch_id:
+        st_branch = getattr(st, "branch_id", None)
+        if st_branch is not None and st_branch != ctx.branch_id:
+            raise HTTPException(status_code=404, detail="station not found")
+
+
+def _gather_station_lines(db: Session, order_id: str, station_id: str | None, ctx: AuthCtx | None = None):
     """
     Collect KOT line items for a specific kitchen station.
     Each line has:
@@ -56,6 +97,13 @@ def _gather_station_lines(db: Session, order_id: str, station_id: str | None):
         .join(MenuItem, MenuItem.id == OrderItem.item_id)
         .filter(OrderItem.order_id == order_id)
     )
+
+    # Restrict to tenant/branch via item's category (MenuItem has no branch_id)
+    if ctx is not None:
+        q = q.join(MenuCategory, MenuCategory.id == MenuItem.category_id)
+        q = q.filter(MenuCategory.tenant_id == ctx.tenant_id)
+        if ctx.branch_id:
+            q = q.filter(MenuCategory.branch_id == ctx.branch_id)
 
     # Only send lines that belong to this station (Indian, Chinese, etc.)
     if station_id:
@@ -95,7 +143,7 @@ def _gather_station_lines(db: Session, order_id: str, station_id: str | None):
     return lines_payload
 
 
-def _build_kot_payload(db: Session, t: KitchenTicket) -> dict:
+def _build_kot_payload(db: Session, t: KitchenTicket, ctx: AuthCtx | None = None) -> dict:
     """
     Build the payload we send to the kitchen printer for this ticket.
     Includes table, waiter, time, and notes.
@@ -115,7 +163,7 @@ def _build_kot_payload(db: Session, t: KitchenTicket) -> dict:
             "time": datetime.now(timezone.utc).isoformat(),
             "note": None,
             "lines": [],
-        }
+        }, None, None, None, None, None
 
     # table code
     table_code = None
@@ -144,8 +192,8 @@ def _build_kot_payload(db: Session, t: KitchenTicket) -> dict:
                 if pr and pr.connection_url:
                     printer_url = pr.connection_url
 
-    # build line items only for this station
-    line_payloads = _gather_station_lines(db, t.order_id, t.target_station)
+    # build line items only for this station (with tenant/branch scope if ctx given)
+    line_payloads = _gather_station_lines(db, t.order_id, t.target_station, ctx)
 
     payload = {
         "type": "KOT",
@@ -169,12 +217,16 @@ async def create_ticket(
     ticket_no: int,
     target_station: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Create a kitchen ticket for a station (e.g. 'Indian', 'Chinese').
     Immediately print to that station's printer.
     """
+
+    # scope checks
+    _ensure_order_access(db, order_id, ctx)
+    _ensure_station_access(db, target_station, ctx)
 
     now = datetime.now(timezone.utc)
 
@@ -190,7 +242,7 @@ async def create_ticket(
     db.refresh(t)
 
     # snapshot ticket lines into KitchenTicketItem rows for audit
-    station_lines = _gather_station_lines(db, order_id, target_station)
+    station_lines = _gather_station_lines(db, order_id, target_station, ctx)
     for ln in station_lines:
         kti = KitchenTicketItem(
             ticket_id=t.id,
@@ -204,7 +256,7 @@ async def create_ticket(
 
     # build payload and send to printer agent
     payload, printer_url, station_name, table_code, waiter_name, order = _build_kot_payload(
-        db, t
+        db, t, ctx
     )
 
     if printer_url:
@@ -213,7 +265,7 @@ async def create_ticket(
     # audit log (PRINT_KOT)
     db.add(
         AuditLog(
-            actor_user_id=sub,
+            actor_user_id=getattr(ctx, "sub", None),
             entity="KitchenTicket",
             entity_id=t.id,
             action="PRINT_KOT",
@@ -234,14 +286,20 @@ async def create_ticket(
 def list_tickets(
     status: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     List kitchen tickets, optionally filtered by status.
     Used by the kitchen screen (New / In Progress / Ready).
     """
 
-    q = db.query(KitchenTicket)
+    # Scope tickets via their orders to caller's tenant/branch
+    q = db.query(KitchenTicket).join(Order, Order.id == KitchenTicket.order_id)
+    if hasattr(Order, "tenant_id"):
+        q = q.filter(Order.tenant_id == ctx.tenant_id)
+    if ctx.branch_id and hasattr(Order, "branch_id"):
+        q = q.filter(Order.branch_id == ctx.branch_id)
+
     if status:
         try:
             st_enum = KOTStatus[status]
@@ -256,7 +314,7 @@ def list_tickets(
     out = []
     for t in tickets:
         payload, _printer_url, station_name, table_code, waiter_name, order = _build_kot_payload(
-            db, t
+            db, t, ctx
         )
 
         out.append(
@@ -284,15 +342,13 @@ def update_ticket_status(
     ticket_id: str,
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Update kitchen ticket status (NEW → IN_PROGRESS → READY → DONE).
     """
 
-    t = db.get(KitchenTicket, ticket_id)
-    if not t:
-        raise HTTPException(404, detail="ticket not found")
+    t = _ensure_ticket_access(db, ticket_id, ctx)
 
     new_status = body.get("status")
     if new_status:
@@ -303,7 +359,7 @@ def update_ticket_status(
 
     db.add(
         AuditLog(
-            actor_user_id=sub,
+            actor_user_id=getattr(ctx, "sub", None),
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="STATUS_CHANGE",
@@ -327,17 +383,15 @@ async def reprint(
     ticket_id: str,
     reason: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("REPRINT")),
+    ctx: AuthCtx = Depends(require_perm("REPRINT")),
 ):
     """
     Reprint a kitchen ticket (KOT). Increments reprint_count.
     """
 
-    t = db.get(KitchenTicket, ticket_id)
-    if not t:
-        raise HTTPException(404, detail="ticket not found")
+    t = _ensure_ticket_access(db, ticket_id, ctx)
 
-    payload, printer_url, _, _, _, _ = _build_kot_payload(db, t)
+    payload, printer_url, _, _, _, _ = _build_kot_payload(db, t, ctx)
     payload["reprint"] = True
 
     if printer_url:
@@ -349,7 +403,7 @@ async def reprint(
 
     db.add(
         AuditLog(
-            actor_user_id=sub,
+            actor_user_id=getattr(ctx, "sub", None),
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="REPRINT",
@@ -371,15 +425,13 @@ def cancel(
     ticket_id: str,
     reason: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("VOID")),
+    ctx: AuthCtx = Depends(require_perm("VOID")),
 ):
     """
     Cancel a kitchen ticket. Status -> CANCELLED.
     """
 
-    t = db.get(KitchenTicket, ticket_id)
-    if not t:
-        raise HTTPException(404, detail="ticket not found")
+    t = _ensure_ticket_access(db, ticket_id, ctx)
 
     t.status = KOTStatus.CANCELLED
     if hasattr(t, "cancel_reason"):
@@ -387,7 +439,7 @@ def cancel(
 
     db.add(
         AuditLog(
-            actor_user_id=sub,
+            actor_user_id=getattr(ctx, "sub", None),
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="CANCEL",

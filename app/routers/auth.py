@@ -27,9 +27,6 @@ def login(
     Auth by either:
     - mobile + password
     - mobile + pin
-
-    FastAPI will treat these params as query/form fields.
-    Flutter can POST /auth/login?mobile=...&password=...
     """
     user = db.query(User).filter(User.mobile == mobile).first()
     if not user or not bool(user.active):
@@ -40,11 +37,30 @@ def login(
         ok = verify_pw(user.pass_hash, password)
     if not ok and pin and user.pin_hash:
         ok = verify_pw(user.pin_hash, pin)
-
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    return Token(access_token=create_token(user.id))
+    # Compute a sensible default branch for the user’s tenant (same logic as /me)
+    from app.models.core import Branch
+    default_branch = (
+        db.query(Branch)
+        .filter(Branch.tenant_id == user.tenant_id)
+        .first()
+    )
+    default_branch_id = default_branch.id if default_branch else None
+
+    # Prefer tokens that carry tenant/branch claims; fall back to legacy signature
+    try:
+        token = create_token({
+            "sub": user.id,
+            "tenant_id": user.tenant_id,
+            "branch_id": default_branch_id,
+        })
+    except TypeError:
+        # create_token likely expects just a subject string (legacy behavior)
+        token = create_token(user.id)
+
+    return Token(access_token=token)
 
 
 @router.get("/me")

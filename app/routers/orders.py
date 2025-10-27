@@ -7,7 +7,7 @@ from datetime import datetime, timezone, date
 from decimal import Decimal, ROUND_HALF_UP
 
 from app.db import get_db
-from app.deps import require_auth
+from app.deps import AuthCtx, require_auth
 from app.schemas.orders import OrderIn, OrderOut, OrderItemIn, PaymentIn
 from app.models.core import (
     AuditLog, Invoice, Order, OrderStatus, OrderItem, Payment, MenuItem, ItemVariant,
@@ -41,13 +41,43 @@ def _q3(x) -> Decimal:
     # use string to avoid float binary artifacts
     return Decimal(str(x)).quantize(Decimal("0.001"))
 
+# -------- NEW: multi-tenant/branch helpers --------
+
+def _effective_branch_id(db: Session, ctx: AuthCtx, provided_branch_id: str | None) -> str | None:
+    """
+    If token has ctx.branch_id -> use it.
+    Else, accept provided_branch_id but verify that it belongs to ctx.tenant_id.
+    If neither is present, return None (some channels may be out-of-branch).
+    """
+    bid = (ctx.branch_id or (provided_branch_id or "").strip()) or None
+    if not bid:
+        return None
+    br = db.get(Branch, bid)
+    if (not br) or br.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="branch not found")
+    return bid
+
+def _ensure_order_access(db: Session, order_id: str, ctx: AuthCtx) -> Order:
+    o = db.get(Order, order_id)
+    if not o:
+        raise HTTPException(status_code=404, detail="order not found")
+    # tenant must match if column exists
+    if hasattr(o, "tenant_id") and o.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="order not found")
+    # if ctx is scoped to a branch, order must be in that branch too
+    if ctx.branch_id and hasattr(o, "branch_id") and o.branch_id != ctx.branch_id:
+        raise HTTPException(status_code=404, detail="order not found")
+    return o
+
+# -----------------------------------------------
+
 @router.get("/")
 def list_orders(
     status: str | None = None,
     page: int = 1,
     size: int = 20,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     List orders (paged) for the logged-in user’s tenant/branch context.
@@ -62,6 +92,12 @@ def list_orders(
     """
 
     q = db.query(Order)
+
+    # tenant/branch scoping
+    if hasattr(Order, "tenant_id"):
+        q = q.filter(Order.tenant_id == ctx.tenant_id)
+    if ctx.branch_id and hasattr(Order, "branch_id"):
+        q = q.filter(Order.branch_id == ctx.branch_id)
 
     # optional filter by status
     if status:
@@ -125,11 +161,18 @@ def list_orders(
 
 
 @router.post("/", response_model=OrderOut)
-def open_order(body: OrderIn, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
+def open_order(body: OrderIn, db: Session = Depends(get_db), ctx: AuthCtx = Depends(require_auth)):
+    # prepare kwargs while enforcing tenant/branch
+    data = body.model_dump()
+    if hasattr(Order, "tenant_id"):
+        data["tenant_id"] = ctx.tenant_id
+    if hasattr(Order, "branch_id"):
+        data["branch_id"] = _effective_branch_id(db, ctx, data.get("branch_id"))
+
     o = Order(
-        **body.model_dump(),
+        **data,
         status=OrderStatus.OPEN,
-        opened_by_user_id=sub,
+        opened_by_user_id=ctx.user_id,
         opened_at=datetime.now(timezone.utc),
     )
     db.add(o)
@@ -139,16 +182,17 @@ def open_order(body: OrderIn, db: Session = Depends(get_db), sub: str = Depends(
 
 
 @router.post("/{order_id}/items")
-def add_item(order_id: str, body: OrderItemIn, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
+def add_item(order_id: str, body: OrderItemIn, db: Session = Depends(get_db), ctx: AuthCtx = Depends(require_auth)):
     if order_id != body.order_id:
         raise HTTPException(400, detail="order_id mismatch")
 
-    order = db.get(Order, order_id)
-    if not order:
-        raise HTTPException(404, detail="order not found")
+    order = _ensure_order_access(db, order_id, ctx)
 
     mitem: MenuItem | None = db.get(MenuItem, body.item_id)
     if not mitem:
+        raise HTTPException(404, detail="menu item not found")
+    # tenant check for item if present
+    if hasattr(mitem, "tenant_id") and mitem.tenant_id != ctx.tenant_id:
         raise HTTPException(404, detail="menu item not found")
 
     # default price can be taken from variant if provided (base_price), but API supplies unit_price already.
@@ -227,13 +271,11 @@ def add_item(order_id: str, body: OrderItemIn, db: Session = Depends(get_db), su
 
 
 @router.post("/{order_id}/pay")
-def pay(order_id: str, body: PaymentIn, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
+def pay(order_id: str, body: PaymentIn, db: Session = Depends(get_db), ctx: AuthCtx = Depends(require_auth)):
     if order_id != body.order_id:
         raise HTTPException(400, detail="order_id mismatch")
 
-    o = db.get(Order, order_id)
-    if not o:
-        raise HTTPException(404, detail="order not found")
+    o = _ensure_order_access(db, order_id, ctx)
 
     p = Payment(**body.model_dump(), paid_at=datetime.now(timezone.utc))
     db.add(p)
@@ -245,7 +287,7 @@ def pay(order_id: str, body: PaymentIn, db: Session = Depends(get_db), sub: str 
     o.closed_at = datetime.now(timezone.utc)
     # mark who closed (cashier)
     if hasattr(o, "closed_by_user_id"):
-        o.closed_by_user_id = sub
+        o.closed_by_user_id = ctx.user_id
 
     db.commit()
     return {
@@ -259,11 +301,9 @@ def pay(order_id: str, body: PaymentIn, db: Session = Depends(get_db), sub: str 
 def create_invoice(
     order_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
-    o = db.get(Order, order_id)
-    if not o:
-        raise HTTPException(404, detail="order not found")
+    o = _ensure_order_access(db, order_id, ctx)
 
     # Idempotency: if invoice already exists, return it
     existing = db.query(Invoice).filter(Invoice.order_id == order_id).first()
@@ -293,7 +333,7 @@ def create_invoice(
                 reprint_count=0,  # first print = not a "reprint" yet
             )
             if hasattr(inv, "cashier_user_id"):
-                inv.cashier_user_id = sub
+                inv.cashier_user_id = ctx.user_id
 
             db.add(inv)
             db.commit()
@@ -315,8 +355,10 @@ def remove_item(
     order_item_id: str,
     reason: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
+    _ensure_order_access(db, order_id, ctx)
+
     line = db.get(OrderItem, order_item_id)
     if not line or line.order_id != order_id:
         raise HTTPException(404, detail="order item not found")
@@ -344,7 +386,7 @@ def remove_item(
 
     # audit (optional)
     if "AuditLog" in globals():
-        db.add(AuditLog(actor_user_id=sub, entity="OrderItem", entity_id=order_item_id, action="CANCEL", reason=reason))
+        db.add(AuditLog(actor_user_id=ctx.user_id, entity="OrderItem", entity_id=order_item_id, action="CANCEL", reason=reason))
 
     db.commit()
     return {"ok": True}
@@ -355,11 +397,13 @@ def apply_discount(
     order_item_id: str,
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     body: {discount: float, reason?: str}
     """
+    _ensure_order_access(db, order_id, ctx)
+
     line = db.get(OrderItem, order_item_id)
     if not line or line.order_id != order_id:
         raise HTTPException(404, detail="order item not found")
@@ -382,11 +426,9 @@ def void_order(
     order_id: str,
     reason: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
-    o = db.get(Order, order_id)
-    if not o:
-        raise HTTPException(404, detail="order not found")
+    o = _ensure_order_access(db, order_id, ctx)
 
     # choose a suitable terminal status
     if hasattr(OrderStatus, "VOID"):
@@ -400,16 +442,14 @@ def void_order(
         o.void_reason = reason
 
     if "AuditLog" in globals():
-        db.add(AuditLog(actor_user_id=sub, entity="Order", entity_id=order_id, action="VOID", reason=reason))
+        db.add(AuditLog(actor_user_id=ctx.user_id, entity="Order", entity_id=order_id, action="VOID", reason=reason))
 
     db.commit()
     return {"id": o.id, "status": o.status.value}
 
 @router.get("/{order_id}")
-def get_order(order_id: str, db: Session = Depends(get_db), sub: str = Depends(require_auth)):
-    o = db.get(Order, order_id)
-    if not o:
-        raise HTTPException(404, detail="order not found")
+def get_order(order_id: str, db: Session = Depends(get_db), ctx: AuthCtx = Depends(require_auth)):
+    o = _ensure_order_access(db, order_id, ctx)
 
     totals = compute_bill(db, order_id)
     paid = float(sum((p.amount or 0) for p in db.query(Payment).filter(Payment.order_id == order_id).all()))

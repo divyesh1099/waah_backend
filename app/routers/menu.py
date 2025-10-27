@@ -14,6 +14,7 @@ from app.schemas.menu import (
     VariantOut,
 )
 from app.models.core import (
+    Branch,
     MenuCategory,
     MenuItem,
     ItemVariant,
@@ -21,7 +22,7 @@ from app.models.core import (
     Modifier,
     ItemModifierGroup,
 )
-from app.deps import require_auth, require_perm
+from app.deps import AuthCtx, require_auth, require_perm
 
 router = APIRouter(prefix="/menu", tags=["menu"])
 
@@ -83,6 +84,44 @@ def _category_payload(c: MenuCategory) -> dict:
     }
 
 
+def _ensure_category_access(db: Session, cat_id: str, ctx: AuthCtx) -> MenuCategory:
+    cat = db.get(MenuCategory, cat_id)
+    if (not cat) or getattr(cat, "deleted_at", None) is not None:
+        raise HTTPException(status_code=404, detail="category not found")
+    if cat.tenant_id != ctx.tenant_id:
+        # hide existence across tenants
+        raise HTTPException(status_code=404, detail="category not found")
+    if ctx.branch_id and cat.branch_id != ctx.branch_id:
+        raise HTTPException(status_code=404, detail="category not found")
+    return cat
+
+def _ensure_item_access(db: Session, item_id: str, ctx: AuthCtx) -> MenuItem:
+    it = db.get(MenuItem, item_id)
+    if (not it) or getattr(it, "deleted_at", None) is not None:
+        raise HTTPException(status_code=404, detail="item not found")
+    if it.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="item not found")
+    # enforce branch through its category
+    cat = db.get(MenuCategory, it.category_id)
+    if (not cat) or cat.tenant_id != ctx.tenant_id or (ctx.branch_id and cat.branch_id != ctx.branch_id):
+        raise HTTPException(status_code=404, detail="item not found")
+    return it
+
+def _effective_branch_id(db: Session, ctx: AuthCtx, provided_branch_id: Optional[str]) -> str:
+    """
+    Decide which branch to use:
+      - If token has ctx.branch_id => use it.
+      - Else, require caller to provide branch_id and verify it belongs to ctx.tenant_id.
+    """
+    bid = (ctx.branch_id or (provided_branch_id or "").strip())
+    if not bid:
+        raise HTTPException(status_code=400, detail="branch not selected")
+    br = db.get(Branch, bid)
+    if (not br) or br.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="branch not found")
+    return bid
+
+
 # ---------- ITEMS (for POS grid etc) ----------
 
 @router.get("/items")
@@ -91,31 +130,36 @@ def list_items(
     tenant_id: Optional[str] = None,
     branch_id: Optional[str] = None,  # accepted for future branch scoping
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Returns a list of menu items for POS.
     Shape matches what the Flutter MenuItem.fromJson() expects.
     """
+    # tenant isolation
+    if tenant_id is not None and tenant_id != ctx.tenant_id:
+        # pretend nothing found if trying to peek at another tenant
+        return []
 
-    q = db.query(MenuItem)
+    # if caller/ctx has a branch, enforce via category join
+    q = (
+        db.query(MenuItem)
+          .join(MenuCategory, MenuCategory.id == MenuItem.category_id)
+          .filter(MenuItem.deleted_at.is_(None))
+          .filter(MenuItem.tenant_id == ctx.tenant_id)
+    )
 
-    # soft-delete filter (TSMMixin likely gives deleted_at)
-    q = q.filter(MenuItem.deleted_at.is_(None))
+    # enforce branch either from ctx or provided (validated)
+    if ctx.branch_id or (branch_id or "").strip():
+        eff_branch = _effective_branch_id(db, ctx, branch_id)
+        q = q.filter(MenuCategory.branch_id == eff_branch)
 
-    # category filter if provided
+    # category filter if provided (and ensure it's in-tenant/branch)
     if category_id:
-        q = q.filter(MenuItem.category_id == category_id)
-
-    # tenant scoping: right now Flutter sends "" as tenant_id
-    if tenant_id is not None:
-        q = q.filter(MenuItem.tenant_id == tenant_id)
-
-    # NOTE: MenuItem model doesn't have branch_id column today,
-    # so we ignore `branch_id`. We still accept it so frontend can send it.
+        cat = _ensure_category_access(db, category_id, ctx)
+        q = q.filter(MenuItem.category_id == cat.id)
 
     rows: List[MenuItem] = q.all()
-
     return [_item_payload(m) for m in rows]
 
 
@@ -123,17 +167,24 @@ def list_items(
 def create_item(
     body: MenuItemIn,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Create a new item.
     Used by: repo.createItem(...)
     """
-    it = MenuItem(**body.model_dump())
+    # must attach to a category that belongs to this tenant/branch
+    _ensure_category_access(db, body.category_id, ctx)
+
+    data = body.model_dump()
+    # force tenant to caller's tenant
+    data["tenant_id"] = ctx.tenant_id
+
+    it = MenuItem(**data)
     db.add(it)
     db.commit()
     db.refresh(it)
-    return MenuItemOut(id=it.id, **body.model_dump())
+    return MenuItemOut(id=it.id, **body.model_dump() | {"tenant_id": ctx.tenant_id})
 
 
 # NEW: PATCH /items/{item_id}
@@ -142,16 +193,17 @@ def patch_item(
     item_id: str,
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
     Update editable fields on an existing item.
     Used by the Item Detail page (name, desc, active, stock_out, taxInclusive, gstRate, etc.)
     """
+    it = _ensure_item_access(db, item_id, ctx)
 
-    it: MenuItem | None = db.get(MenuItem, item_id)
-    if not it or getattr(it, "deleted_at", None) is not None:
-        raise HTTPException(status_code=404, detail="item not found")
+    # if category is changing, validate new category belongs to same tenant/branch scope
+    if "category_id" in body and body["category_id"]:
+        _ensure_category_access(db, str(body["category_id"]), ctx)
 
     # fields we allow patching from the UI
     updatable_fields = [
@@ -179,18 +231,13 @@ def patch_item(
 def delete_item(
     item_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
     Soft-delete an item by setting deleted_at.
     Frontend calls catalogRepo.deleteItem(id).
     """
-
-    it: MenuItem | None = db.get(MenuItem, item_id)
-    if not it or getattr(it, "deleted_at", None) is not None:
-        # Either doesn't exist or already deleted
-        raise HTTPException(status_code=404, detail="item not found")
-
+    it = _ensure_item_access(db, item_id, ctx)
     it.deleted_at = datetime.utcnow()
     db.commit()
     return {"ok": True, "id": item_id}
@@ -201,11 +248,9 @@ def set_stock_out(
     item_id: str,
     value: bool,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
-    it = db.get(MenuItem, item_id)
-    if not it or getattr(it, "deleted_at", None) is not None:
-        raise HTTPException(404, detail="item not found")
+    it = _ensure_item_access(db, item_id, ctx)
     it.stock_out = bool(value)
     db.commit()
     return {"id": it.id, "stock_out": it.stock_out}
@@ -216,11 +261,9 @@ def assign_station(
     item_id: str,
     station_id: str | None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
-    it = db.get(MenuItem, item_id)
-    if not it or getattr(it, "deleted_at", None) is not None:
-        raise HTTPException(404, detail="item not found")
+    it = _ensure_item_access(db, item_id, ctx)
     it.kitchen_station_id = station_id
     db.commit()
     return {"id": it.id, "kitchen_station_id": it.kitchen_station_id}
@@ -232,15 +275,13 @@ def update_tax(
     gst_rate: float,
     tax_inclusive: bool = True,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
     Keeps backward-compat with existing frontend which calls updateItemTax().
     Newer UI may just PATCH /items/{id}, but we keep this endpoint too.
     """
-    it = db.get(MenuItem, item_id)
-    if not it or getattr(it, "deleted_at", None) is not None:
-        raise HTTPException(404, detail="item not found")
+    it = _ensure_item_access(db, item_id, ctx)
     it.gst_rate = gst_rate
     it.tax_inclusive = tax_inclusive
     db.commit()
@@ -257,12 +298,13 @@ def update_tax(
 def list_variants(
     item_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Returns all variants for a given item_id.
     Matches ItemVariant.fromJson() in Flutter.
     """
+    _ensure_item_access(db, item_id, ctx)
     rows: List[ItemVariant] = (
         db.query(ItemVariant)
         .filter(ItemVariant.item_id == item_id)
@@ -276,7 +318,7 @@ def list_variants(
 def create_variant(
     body: VariantIn,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Create a variant. If is_default=True, unset any existing default for that item.
@@ -285,10 +327,14 @@ def create_variant(
     data = body.model_dump()
 
     item_id = data.get("item_id")
-    make_default = bool(data.get("is_default", False))
+    if not item_id:
+        raise HTTPException(status_code=400, detail="item_id required")
 
-    if make_default and item_id:
-        # clear old defaults for this item
+    # ensure variant is for an item in my tenant/branch
+    _ensure_item_access(db, item_id, ctx)
+
+    make_default = bool(data.get("is_default", False))
+    if make_default:
         db.query(ItemVariant).filter(
             ItemVariant.item_id == item_id
         ).update({"is_default": False})
@@ -297,7 +343,6 @@ def create_variant(
     db.add(v)
     db.commit()
     db.refresh(v)
-    # NOTE: VariantOut(id=..., ...) should still validate
     return VariantOut(id=v.id, **data)
 
 
@@ -307,7 +352,7 @@ def update_variant(
     variant_id: str,
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Edit label / prices / default flag for a variant.
@@ -316,6 +361,9 @@ def update_variant(
     v: ItemVariant | None = db.get(ItemVariant, variant_id)
     if not v:
         raise HTTPException(status_code=404, detail="variant not found")
+
+    # tenant/branch scope via the parent item
+    _ensure_item_access(db, v.item_id, ctx)
 
     # if caller wants to make THIS variant default, unset all others first
     if body.get("is_default") is True:
@@ -338,7 +386,7 @@ def update_variant(
 def delete_variant(
     variant_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Delete variant. If it was default, promote another variant as default.
@@ -347,6 +395,8 @@ def delete_variant(
     v: ItemVariant | None = db.get(ItemVariant, variant_id)
     if not v:
         raise HTTPException(status_code=404, detail="variant not found")
+
+    _ensure_item_access(db, v.item_id, ctx)
 
     item_id = v.item_id
     was_default = bool(v.is_default)
@@ -375,13 +425,19 @@ def delete_variant(
 def create_category(
     body: MenuCategoryIn,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
-    cat = MenuCategory(**body.model_dump())
+    # normalize & enforce tenant/branch
+    eff_branch = _effective_branch_id(db, ctx, body.branch_id)
+    data = body.model_dump()
+    data["tenant_id"] = ctx.tenant_id
+    data["branch_id"] = eff_branch
+
+    cat = MenuCategory(**data)
     db.add(cat)
     db.commit()
     db.refresh(cat)
-    return MenuCategoryOut(id=cat.id, **body.model_dump())
+    return MenuCategoryOut(id=cat.id, **data)
 
 
 @router.get("/categories", response_model=List[MenuCategoryOut])
@@ -389,13 +445,19 @@ def list_categories(
     tenant_id: str,
     branch_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
+    # tenant isolation — ignore mismatched query attempts
+    if tenant_id != ctx.tenant_id:
+        return []
+
+    eff_branch = _effective_branch_id(db, ctx, branch_id)
+
     rows = (
         db.query(MenuCategory)
         .filter(
-            MenuCategory.tenant_id == tenant_id,
-            MenuCategory.branch_id == branch_id,
+            MenuCategory.tenant_id == ctx.tenant_id,
+            MenuCategory.branch_id == eff_branch,
             MenuCategory.deleted_at.is_(None),
         )
         .order_by(MenuCategory.position)
@@ -419,15 +481,13 @@ def patch_category(
     cat_id: str,
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
     Update a category's name / position.
     Used by Edit Category dialog.
     """
-    cat: MenuCategory | None = db.get(MenuCategory, cat_id)
-    if not cat or getattr(cat, "deleted_at", None) is not None:
-        raise HTTPException(status_code=404, detail="category not found")
+    cat = _ensure_category_access(db, cat_id, ctx)
 
     if "name" in body:
         cat.name = body["name"]
@@ -449,17 +509,13 @@ def patch_category(
 def delete_category(
     cat_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
     Soft delete: set deleted_at timestamp.
     Frontend calls catalogRepo.deleteCategory(id).
     """
-
-    cat: MenuCategory | None = db.get(MenuCategory, cat_id)
-    if not cat or getattr(cat, "deleted_at", None) is not None:
-        raise HTTPException(status_code=404, detail="category not found")
-
+    cat = _ensure_category_access(db, cat_id, ctx)
     cat.deleted_at = datetime.utcnow()
     db.commit()
     return {"ok": True, "id": cat_id}
@@ -471,12 +527,14 @@ def delete_category(
 def create_modifier_group(
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     body: {tenant_id: str, name: str, min_sel: int, max_sel: int}
     """
-    mg = ModifierGroup(**body)
+    data = dict(body)
+    data["tenant_id"] = ctx.tenant_id  # force to caller's tenant
+    mg = ModifierGroup(**data)
     db.add(mg)
     db.commit()
     db.refresh(mg)
@@ -487,12 +545,14 @@ def create_modifier_group(
 def create_modifier(
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     body: {group_id: str, name: str, price_delta: float}
     """
-    if not db.get(ModifierGroup, body.get("group_id")):
+    group_id = body.get("group_id")
+    grp: ModifierGroup | None = db.get(ModifierGroup, group_id)
+    if not grp or grp.tenant_id != ctx.tenant_id:
         raise HTTPException(404, detail="modifier group not found")
     m = Modifier(**body)
     db.add(m)
@@ -505,7 +565,7 @@ def create_modifier(
 def get_item_modifiers_full(
     item_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Return all modifier groups linked to this item AND the modifiers in each group.
@@ -527,21 +587,26 @@ def get_item_modifiers_full(
       ...
     ]
     """
+    # enforce item access
+    _ensure_item_access(db, item_id, ctx)
 
-    # 1. find modifier groups linked to this item via ItemModifierGroup
+    # find modifier groups linked to this item and scoped to tenant
     groups: List[ModifierGroup] = (
         db.query(ModifierGroup)
         .join(
             ItemModifierGroup,
             ItemModifierGroup.group_id == ModifierGroup.id,
         )
-        .filter(ItemModifierGroup.item_id == item_id)
+        .filter(
+            ItemModifierGroup.item_id == item_id,
+            ModifierGroup.tenant_id == ctx.tenant_id,
+        )
         .all()
     )
 
     result = []
     for g in groups:
-        # 2. load all modifiers in that group
+        # load all modifiers in that group
         mods: List[Modifier] = (
             db.query(Modifier)
             .filter(Modifier.group_id == g.id)
@@ -574,16 +639,17 @@ def link_item_group(
     item_id: str,
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     body: {group_id: str}
     """
-    if not db.get(MenuItem, item_id):
-        raise HTTPException(404, detail="menu item not found")
+    # item must be in my tenant/branch
+    _ensure_item_access(db, item_id, ctx)
 
-    group_id = body.get("group_id")
-    if not db.get(ModifierGroup, group_id):
+    group_id = (body or {}).get("group_id")
+    grp: ModifierGroup | None = db.get(ModifierGroup, group_id)
+    if not grp or grp.tenant_id != ctx.tenant_id:
         raise HTTPException(404, detail="modifier group not found")
 
     exists = (
