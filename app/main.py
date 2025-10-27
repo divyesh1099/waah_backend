@@ -14,7 +14,7 @@ from app.config import settings
 # Routers (keep existing)
 from app.routers import identity, onboard, auth, dining, menu, orders, sync, kot, admin, users, customers
 from app.routers import settings as settings_router
-from app.routers import backup, reports
+from app.routers import backup, reports, media
 
 # New routers wired for the new models / features
 from app.routers import inventory, shift, printjob, online
@@ -54,7 +54,7 @@ app.include_router(admin.router)
 app.include_router(settings_router.router)
 app.include_router(backup.router)
 app.include_router(reports.router)
-
+app.include_router(media.router)
 # Add the missing ones
 app.include_router(inventory.router)
 app.include_router(shift.router)
