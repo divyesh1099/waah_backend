@@ -29,12 +29,16 @@ async def save_image_upload(
     allowed_types: Iterable[str] | None = None,
     max_bytes: int = 8 * 1024 * 1024,  # 8 MB
 ) -> str:
+    """
+    Save `UploadFile` under MEDIA_ROOT/<subdir>/ and return the URL path
+    rooted at MEDIA_URL_BASE (e.g. "/media/items/xyz.jpg").
+    """
     ct = (file.content_type or "").lower()
     allowed = set(allowed_types or _ALLOWED_IMAGE_CT)
     if ct not in allowed:
         raise HTTPException(status_code=415, detail=f"Unsupported image type: {ct}")
 
-    # simple size guard (best-effort, only if header present)
+    # Optional size guard (if client sent content-length)
     try:
         size_hdr = file.headers.get("content-length") if file.headers else None
         if size_hdr and int(size_hdr) > max_bytes:
@@ -42,7 +46,7 @@ async def save_image_upload(
     except Exception:
         pass
 
-    media_root = Path(settings.MEDIA_ROOT)
+    media_root: Path = Path(settings.MEDIA_ROOT).resolve()
     folder = (media_root / subdir).resolve()
     folder.mkdir(parents=True, exist_ok=True)
 
@@ -65,7 +69,7 @@ async def save_image_upload(
 
     dest = folder / fname
 
-    # stream to disk
+    # Stream to disk
     with dest.open("wb") as out:
         while True:
             chunk = await file.read(1024 * 1024)
@@ -73,7 +77,7 @@ async def save_image_upload(
                 break
             out.write(chunk)
 
-    # URL path for StaticFiles mount
+    # URL to return (prefix from settings, relative path from media_root)
     rel = dest.relative_to(media_root).as_posix()
-    base = settings.MEDIA_URL_BASE.rstrip("/")
+    base = "/" + settings.MEDIA_URL_BASE.strip("/")
     return f"{base}/{rel}"

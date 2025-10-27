@@ -2,12 +2,13 @@
 from __future__ import annotations
 import re
 from fastapi import APIRouter, UploadFile, File, HTTPException, Query
+
 from app.util.media import save_image_upload
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
 # keep subdir simple; avoid path traversal
-_SUBDIR_RE = re.compile(r"^[a-zA-Z0-9_\-\/]{1,64}$")
+_SUBDIR_RE = re.compile(r"^[a-zA-Z0-9_/-]{1,64}$")
 
 @router.post("/upload")
 async def upload_image(

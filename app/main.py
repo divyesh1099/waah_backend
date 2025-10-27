@@ -2,16 +2,17 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 from app.middleware import RequestIdMiddleware
 from app.db import Base, engine
-from app.config import settings
+from app.config import settings, MEDIA_ROOT_PATH, MEDIA_URL_PREFIX
 
 # Routers
 from app.routers import (
-    identity, onboard, auth, dining, menu, orders, sync, kot, admin,
-    users, customers, backup, reports, media, settings as settings_router,
-    inventory, shift, printjob, online,
+    identity, onboard, auth, dining, menu, orders, sync, kot, admin, users,
+    customers, settings as settings_router, backup, reports, media,
+    inventory, shift, printjob, online
 )
 
 app = FastAPI(title="Waah API", version="0.3.0")
@@ -22,8 +23,8 @@ def init_db():
 
 # Serve uploaded media
 app.mount(
-    settings.MEDIA_URL_BASE,
-    StaticFiles(directory=settings.MEDIA_ROOT),
+    MEDIA_URL_PREFIX(),
+    StaticFiles(directory=str(MEDIA_ROOT_PATH())),
     name="media",
 )
 
