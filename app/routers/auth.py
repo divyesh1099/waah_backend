@@ -1,38 +1,31 @@
-from fastapi import APIRouter, Depends, HTTPException
+# app/routers/auth.py
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from uuid import UUID
 
 from app.schemas.common import Token
 from app.util.security import create_token, verify_pw
 from app.models.core import (
-    User,
-    Role,
-    UserRole,
-    RolePermission,
-    Permission,
+    User, Role, UserRole, RolePermission, Permission,
 )
 from app.db import get_db
-from app.deps import require_auth
+from app.deps import require_auth, AuthCtx  # <-- AuthCtx-based dep
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
 
 # ---------- helpers ----------
 def _coerce_user_pk(sub: str):
     """Coerce JWT sub into the actual PK type for Session.get()."""
     if sub is None:
         return None
-    # try int
     try:
         return int(sub)
     except (TypeError, ValueError):
         pass
-    # try UUID
     try:
         return UUID(str(sub))
     except (TypeError, ValueError):
         pass
-    # fallback: string PKs
     return str(sub)
 
 def _s(v):
@@ -64,51 +57,45 @@ def login(
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # Compute a sensible default branch for the user’s tenant (same logic as /me)
+    # Compute a sensible default branch for user's tenant
     from app.models.core import Branch
     default_branch = (
         db.query(Branch)
         .filter(Branch.tenant_id == user.tenant_id)
+        .order_by(Branch.id.asc())
         .first()
     )
     default_branch_id = default_branch.id if default_branch else None
 
-    # Prefer tokens that carry tenant/branch claims; fall back to legacy signature
-    try:
-        token = create_token({
-            "sub": _s(user.id),
-            "tenant_id": _s(user.tenant_id) or None,
-            "branch_id": _s(default_branch_id) or None,
-        })
-    except TypeError:
-        # create_token likely expects just a subject string (legacy behavior)
-        token = create_token(_s(user.id))
-
+    # Emit both long/short claim names for compatibility (tenant_id/tid, branch_id/bid)
+    claims = {
+        "sub": _s(user.id),
+        "tenant_id": _s(user.tenant_id) or None,
+        "tid": _s(user.tenant_id) or None,
+        "branch_id": _s(default_branch_id) or None,
+        "bid": _s(default_branch_id) or None,
+    }
+    token = create_token(claims)
     return Token(access_token=token)
 
 
 @router.get("/me")
 def me(
-    sub: str = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),   # <-- IMPORTANT: use AuthCtx
     db: Session = Depends(get_db),
 ):
     """
     Return the logged-in user's profile + RBAC info.
-    Includes a default branch_id for the tenant.
-    Critical fix: coerce JWT `sub` to the correct PK type before Session.get().
+    Uses user_id/tenant_id/branch_id from AuthCtx produced by require_auth.
     """
-    pk = _coerce_user_pk(sub)
-    if pk is None:
-        raise HTTPException(status_code=401, detail="Invalid token (no sub)")
-
-    u: User | None = db.get(User, pk)
+    # Load user by PK (ctx.user_id is normalized string)
+    u: User | None = db.get(User, ctx.user_id)
     if not u or not bool(u.active):
         raise HTTPException(status_code=404, detail="user not found or inactive")
 
     # roles -> ["ADMIN", "CASHIER", ...]
     role_codes = [
-        rc
-        for (rc,) in (
+        rc for (rc,) in (
             db.query(Role.code)
             .join(UserRole, UserRole.role_id == Role.id)
             .filter(UserRole.user_id == u.id)
@@ -116,10 +103,9 @@ def me(
         )
     ]
 
-    # permissions -> distinct ["SETTINGS_EDIT", ...]
+    # permissions -> distinct set
     perm_codes = {
-        pc
-        for (pc,) in (
+        pc for (pc,) in (
             db.query(Permission.code)
             .join(RolePermission, RolePermission.permission_id == Permission.id)
             .join(UserRole, UserRole.role_id == RolePermission.role_id)
@@ -128,23 +114,17 @@ def me(
         )
     }
 
-    # Pick a "current" branch for this tenant.
-    # Prefer a user-level active branch if present; else first branch for tenant.
-    from app.models.core import Branch  # local import to avoid circulars
-    preferred_branch_id = getattr(u, "active_branch_id", None)
-    branch_id = preferred_branch_id
+    # Prefer branch from token (ctx.branch_id); fallback to first tenant branch
+    branch_id = ctx.branch_id
     if not branch_id:
-        branch = (
-            db.query(Branch)
-            .filter(Branch.tenant_id == u.tenant_id)
-            .first()
-        )
-        branch_id = branch.id if branch else None
+        from app.models.core import Branch
+        b = db.query(Branch).filter(Branch.tenant_id == ctx.tenant_id).first()
+        branch_id = b.id if b else None
 
     return {
-        "id": _s(u.id),
-        "tenant_id": _s(u.tenant_id),
-        "branch_id": _s(branch_id),          # frontend reads branch_id/branchId
+        "id": str(u.id),
+        "tenant_id": str(ctx.tenant_id) if ctx.tenant_id else None,
+        "branch_id": str(branch_id) if branch_id else None,
         "name": u.name,
         "mobile": u.mobile,
         "email": u.email,
