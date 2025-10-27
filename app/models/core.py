@@ -141,6 +141,7 @@ class RestaurantSettings(Base, IdMixin, TSMMixin):
     tenant_id: Mapped[str] = mapped_column(String(36))
     branch_id: Mapped[str] = mapped_column(String(36))
     name: Mapped[str] = mapped_column(String(200))
+    # already present; keep as optional
     logo_url: Mapped[str | None] = mapped_column(String(400))
     address: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(String(20))
@@ -153,7 +154,7 @@ class RestaurantSettings(Base, IdMixin, TSMMixin):
     packing_charge_mode: Mapped[ChargeMode] = mapped_column(Enum(ChargeMode), default=ChargeMode.NONE)
     packing_charge_value: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
     billing_printer_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("printer.id"))
-    invoice_footer: Mapped[str | None] = mapped_column(String(200), default="Thank you!")  # footer text
+    invoice_footer: Mapped[str | None] = mapped_column(String(200), default="Thank you!")
 
 # ── Menu ────────────────────────────────────────────────────────────────────
 class MenuCategory(Base, IdMixin, TSMMixin):
@@ -167,15 +168,17 @@ class MenuItem(Base, IdMixin, TSMMixin):
     __tablename__ = "menu_item"
     tenant_id: Mapped[str] = mapped_column(String(36))
     name: Mapped[str] = mapped_column(String(160))
-    description: Mapped[str | None] = mapped_column(Text)  # digital menu
+    description: Mapped[str | None] = mapped_column(Text)
     category_id: Mapped[str] = mapped_column(String(36), ForeignKey("menu_category.id"))
     sku: Mapped[str | None] = mapped_column(String(60))
     hsn: Mapped[str | None] = mapped_column(String(16))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     stock_out: Mapped[bool] = mapped_column(Boolean, default=False)
     tax_inclusive: Mapped[bool] = mapped_column(Boolean, default=True)
-    gst_rate: Mapped[float] = mapped_column(Numeric(5, 2), default=5.00)  # default GST%
-    kitchen_station_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("kitchen_station.id"))  # route KOT
+    gst_rate: Mapped[float] = mapped_column(Numeric(5, 2), default=5.00)
+    kitchen_station_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("kitchen_station.id"))
+    # NEW: optional primary image for the item
+    image_url: Mapped[str | None] = mapped_column(String(400))
 
 class ItemVariant(Base, IdMixin, TSMMixin):
     __tablename__ = "item_variant"
@@ -184,6 +187,8 @@ class ItemVariant(Base, IdMixin, TSMMixin):
     mrp: Mapped[float | None] = mapped_column(Numeric(10, 2))
     base_price: Mapped[float] = mapped_column(Numeric(10, 2))
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # NEW: optional variant image (e.g., size/pack shot)
+    image_url: Mapped[str | None] = mapped_column(String(400))
 
 class ModifierGroup(Base, IdMixin, TSMMixin):
     __tablename__ = "modifier_group"
@@ -362,8 +367,10 @@ class Ingredient(Base, IdMixin, TSMMixin):
     __tablename__ = "ingredient"
     tenant_id: Mapped[str] = mapped_column(String(36))
     name: Mapped[str] = mapped_column(String(160))
-    uom: Mapped[str] = mapped_column(String(20))  # e.g. g, kg, ml, l, pcs
+    uom: Mapped[str] = mapped_column(String(20))
     min_level: Mapped[float] = mapped_column(Numeric(12, 3), default=0)
+    # NEW: optional image for ingredient (pack photo, reference)
+    image_url: Mapped[str | None] = mapped_column(String(400))
 
 class RecipeBOM(Base, TSMMixin):
     __tablename__ = "recipe_bom"
