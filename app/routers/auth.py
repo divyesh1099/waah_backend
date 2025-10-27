@@ -52,9 +52,9 @@ def login(
     # Prefer tokens that carry tenant/branch claims; fall back to legacy signature
     try:
         token = create_token({
-            "sub": user.id,
-            "tenant_id": user.tenant_id,
-            "branch_id": default_branch_id,
+            "sub": str(user.id),
+            "tenant_id": str(user.tenant_id) if user.tenant_id else None,
+            "branch_id": str(default_branch_id) if default_branch_id else None,
         })
     except TypeError:
         # create_token likely expects just a subject string (legacy behavior)
