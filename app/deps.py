@@ -35,27 +35,37 @@ def require_db(db=Depends(get_db)):
 # ---------------------------
 # Internal helpers
 # ---------------------------
+def _normalize_user_id(v) -> str:
+    """Make sure we always have a scalar PK string for SQLAlchemy filters."""
+    if isinstance(v, (list, tuple)) and v:
+        return str(v[0])
+    return "" if v is None else str(v)
+
 def _fetch_user_tenant(db: Session, user_id: str) -> str:
-    u = db.get(User, user_id)
-    if not u:
+    uid = _normalize_user_id(user_id)
+    # Query just the needed column; avoid Session.get() pitfalls with odd IDs
+    row = db.query(User.tenant_id).filter(User.id == uid).first()
+    if not row:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unknown user")
-    return u.tenant_id
+    return row[0]
 
 def _user_permissions(db: Session, user_id: str) -> set[str]:
+    uid = _normalize_user_id(user_id)
     q = (
         db.query(Permission.code)
         .join(RolePermission, RolePermission.permission_id == Permission.id)
         .join(Role, Role.id == RolePermission.role_id)
         .join(UserRole, UserRole.role_id == Role.id)
-        .filter(UserRole.user_id == user_id)
+        .filter(UserRole.user_id == uid)
     )
     return {row[0] for row in q.all()}
 
 def _has_admin_role(db: Session, user_id: str) -> bool:
+    uid = _normalize_user_id(user_id)
     return bool(
         db.query(Role)
         .join(UserRole, UserRole.role_id == Role.id)
-        .filter(UserRole.user_id == user_id, Role.code == "ADMIN")
+        .filter(UserRole.user_id == uid, Role.code == "ADMIN")
         .first()
     )
 
@@ -87,7 +97,8 @@ def require_auth(
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    user_id = data.get("sub") or data.get("uid")
+    user_id_raw = data.get("sub") or data.get("uid")
+    user_id = _normalize_user_id(user_id_raw)
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token (no sub)")
 
@@ -111,9 +122,10 @@ def require_auth(
 
 def has_perm(db: Session, user_id: str, code: str) -> bool:
     # Keep compatibility helper
-    if _has_admin_role(db, user_id):
+    uid = _normalize_user_id(user_id)
+    if _has_admin_role(db, uid):
         return True
-    return code in _user_permissions(db, user_id)
+    return code in _user_permissions(db, uid)
 
 
 def require_perm(code: str):
