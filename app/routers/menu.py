@@ -1,8 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    UploadFile,
+    File,
+)
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
+import os
 
 from app.db import get_db
 from app.schemas.menu import (
@@ -26,6 +34,11 @@ from app.deps import AuthCtx, require_auth, require_perm
 
 router = APIRouter(prefix="/menu", tags=["menu"])
 
+# Where we'll drop uploaded images.
+# Adjust this to match whatever you're already serving statically.
+MEDIA_ROOT = Path("media")
+MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+
 
 # ---------- helpers ----------
 
@@ -34,37 +47,38 @@ def _as_float(val: Decimal | float | int | None) -> float | None:
         return None
     return float(val)
 
+
 def _ts(dt: datetime | None) -> str | None:
     if dt is None:
         return None
-    # send ISO8601 that Flutter DateTime.tryParse() can eat
+    # Send ISO8601 that Flutter DateTime.tryParse() can parse
     return dt.isoformat()
 
+
 def _item_payload(m: MenuItem) -> dict:
-    """Consistent shape for MenuItem back to Flutter."""
+    """Consistent shape for MenuItem back to Flutter (MenuItem.fromJson)."""
     return {
         "id": m.id,
         "tenant_id": m.tenant_id,
-        # no branch_id field on model today
-
+        # NOTE: MenuItem model doesn't expose branch_id directly in Flutter.
         "name": m.name,
         "description": m.description,
         "category_id": m.category_id,
         "sku": m.sku,
         "hsn": m.hsn,
-
         "is_active": bool(m.is_active),
         "stock_out": bool(m.stock_out),
         "tax_inclusive": bool(m.tax_inclusive),
         "gst_rate": _as_float(m.gst_rate) or 0.0,
-
         "kitchen_station_id": m.kitchen_station_id,
-
+        "image_url": getattr(m, "image_url", None),
         "created_at": _ts(getattr(m, "created_at", None)),
         "updated_at": _ts(getattr(m, "updated_at", None)),
     }
 
+
 def _variant_payload(v: ItemVariant) -> dict:
+    """Matches ItemVariant.fromJson in Flutter."""
     return {
         "id": v.id,
         "item_id": v.item_id,
@@ -72,15 +86,47 @@ def _variant_payload(v: ItemVariant) -> dict:
         "mrp": _as_float(v.mrp),
         "base_price": _as_float(v.base_price) or 0.0,
         "is_default": bool(v.is_default),
+        "image_url": getattr(v, "image_url", None),
     }
 
+
 def _category_payload(c: MenuCategory) -> dict:
+    """Matches MenuCategory.fromJson in Flutter."""
     return {
         "id": c.id,
         "tenant_id": c.tenant_id,
         "branch_id": c.branch_id,
         "name": c.name,
         "position": c.position,
+        "created_at": _ts(getattr(c, "created_at", None)),
+        "updated_at": _ts(getattr(c, "updated_at", None)),
+    }
+
+
+def _modifier_payload(md: Modifier) -> dict:
+    return {
+        "id": md.id,
+        "group_id": md.group_id,
+        "name": md.name,
+        "price_delta": _as_float(md.price_delta) or 0.0,
+    }
+
+
+def _modifier_group_block(
+    grp: ModifierGroup,
+    modifiers: List[Modifier],
+) -> dict:
+    """Shape returned by GET /items/{item_id}/modifiers_full."""
+    return {
+        "id": grp.id,
+        "tenant_id": grp.tenant_id,
+        "name": grp.name,
+        "min_sel": grp.min_sel,
+        "max_sel": grp.max_sel,
+        "required": bool(grp.required),
+        "modifiers": [
+            _modifier_payload(m) for m in modifiers
+        ],
     }
 
 
@@ -95,19 +141,30 @@ def _ensure_category_access(db: Session, cat_id: str, ctx: AuthCtx) -> MenuCateg
         raise HTTPException(status_code=404, detail="category not found")
     return cat
 
+
 def _ensure_item_access(db: Session, item_id: str, ctx: AuthCtx) -> MenuItem:
     it = db.get(MenuItem, item_id)
     if (not it) or getattr(it, "deleted_at", None) is not None:
         raise HTTPException(status_code=404, detail="item not found")
     if it.tenant_id != ctx.tenant_id:
         raise HTTPException(status_code=404, detail="item not found")
+
     # enforce branch through its category
     cat = db.get(MenuCategory, it.category_id)
-    if (not cat) or cat.tenant_id != ctx.tenant_id or (ctx.branch_id and cat.branch_id != ctx.branch_id):
+    if (
+        (not cat)
+        or cat.tenant_id != ctx.tenant_id
+        or (ctx.branch_id and cat.branch_id != ctx.branch_id)
+    ):
         raise HTTPException(status_code=404, detail="item not found")
     return it
 
-def _effective_branch_id(db: Session, ctx: AuthCtx, provided_branch_id: Optional[str]) -> str:
+
+def _effective_branch_id(
+    db: Session,
+    ctx: AuthCtx,
+    provided_branch_id: Optional[str],
+) -> str:
     """
     Decide which branch to use:
       - If token has ctx.branch_id => use it.
@@ -122,7 +179,140 @@ def _effective_branch_id(db: Session, ctx: AuthCtx, provided_branch_id: Optional
     return bid
 
 
-# ---------- ITEMS (for POS grid etc) ----------
+def _save_upload_and_get_url(
+    subdir: str,
+    obj_id: str,
+    upload: UploadFile,
+) -> str:
+    """
+    Save an UploadFile under media/<subdir>/ and return a URL-ish string
+    like "/media/<subdir>/<filename>". You can swap this for S3, etc.
+    """
+    safe_name = Path(upload.filename or "upload.bin").name
+    dest_dir = MEDIA_ROOT / subdir
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    dest_name = f"{obj_id}_{safe_name}"
+    dest_path = dest_dir / dest_name
+
+    # Write file bytes
+    data = upload.file.read()
+    with open(dest_path, "wb") as f:
+        f.write(data)
+
+    # Return something the frontend can stick in `image_url`
+    return f"/media/{subdir}/{dest_name}"
+
+
+# -----------------------------------------------------------------------------
+# CATEGORIES
+# -----------------------------------------------------------------------------
+
+@router.get("/categories")
+def list_categories(
+    tenant_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Returns categories for the current tenant/branch.
+    Matches CatalogRepo.loadCategories() / fetchCategories().
+    """
+    if tenant_id is not None and tenant_id != ctx.tenant_id:
+        # hide cross-tenant attempts
+        return []
+
+    q = (
+        db.query(MenuCategory)
+        .filter(MenuCategory.deleted_at.is_(None))
+        .filter(MenuCategory.tenant_id == ctx.tenant_id)
+    )
+
+    # apply branch scoping (via ctx or explicit)
+    if ctx.branch_id or (branch_id or "").strip():
+        eff_branch = _effective_branch_id(db, ctx, branch_id)
+        q = q.filter(MenuCategory.branch_id == eff_branch)
+
+    rows: List[MenuCategory] = (
+        q.order_by(MenuCategory.position.asc(), MenuCategory.name.asc()).all()
+    )
+
+    return [_category_payload(c) for c in rows]
+
+
+@router.post("/categories", response_model=MenuCategoryOut)
+def create_category(
+    body: MenuCategoryIn,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Create a category. CatalogRepo.createCategory() calls this.
+    We'll force tenant_id and branch_id to match caller scope.
+    """
+    # figure out which branch this should live in
+    eff_branch = _effective_branch_id(
+        db,
+        ctx,
+        getattr(body, "branch_id", None),
+    )
+
+    data = body.model_dump()
+    data["tenant_id"] = ctx.tenant_id
+    data["branch_id"] = eff_branch
+
+    c = MenuCategory(**data)
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+
+    out = _category_payload(c)
+    return MenuCategoryOut(**out)
+
+
+@router.patch("/categories/{category_id}")
+def patch_category(
+    category_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Edit a category's name / position.
+    CatalogRepo.updateCategory() calls this via ApiClient.updateCategory().
+    """
+    c = _ensure_category_access(db, category_id, ctx)
+
+    allowed = ["name", "position"]
+    for fld in allowed:
+        if fld in body:
+            setattr(c, fld, body[fld])
+
+    db.commit()
+    db.refresh(c)
+    return _category_payload(c)
+
+
+@router.delete("/categories/{category_id}")
+def delete_category(
+    category_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Soft-delete a category.
+    CatalogRepo.deleteCategory() calls this.
+    """
+    c = _ensure_category_access(db, category_id, ctx)
+    c.deleted_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "id": category_id}
+
+
+# -----------------------------------------------------------------------------
+# ITEMS
+# -----------------------------------------------------------------------------
 
 @router.get("/items")
 def list_items(
@@ -141,23 +331,23 @@ def list_items(
         # pretend nothing found if trying to peek at another tenant
         return []
 
-    # if caller/ctx has a branch, enforce via category join
+    # base query
     q = (
         db.query(MenuItem)
-          .join(MenuCategory, MenuCategory.id == MenuItem.category_id)
-          .filter(MenuItem.deleted_at.is_(None))
-          .filter(MenuItem.tenant_id == ctx.tenant_id)
+        .join(MenuCategory, MenuCategory.id == MenuItem.category_id)
+        .filter(MenuItem.deleted_at.is_(None))
+        .filter(MenuItem.tenant_id == ctx.tenant_id)
     )
 
-    # enforce branch either from ctx or provided (validated)
+    # enforce branch via category.branch_id
     if ctx.branch_id or (branch_id or "").strip():
         eff_branch = _effective_branch_id(db, ctx, branch_id)
         q = q.filter(MenuCategory.branch_id == eff_branch)
 
-    # category filter if provided (and ensure it's in-tenant/branch)
+    # filter by category if provided
     if category_id:
-        cat = _ensure_category_access(db, category_id, ctx)
-        q = q.filter(MenuItem.category_id == cat.id)
+        _ensure_category_access(db, category_id, ctx)
+        q = q.filter(MenuItem.category_id == category_id)
 
     rows: List[MenuItem] = q.all()
     return [_item_payload(m) for m in rows]
@@ -167,11 +357,11 @@ def list_items(
 def create_item(
     body: MenuItemIn,
     db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
     Create a new item.
-    Used by: repo.createItem(...)
+    Used by: CatalogRepo.createItem().
     """
     # must attach to a category that belongs to this tenant/branch
     _ensure_category_access(db, body.category_id, ctx)
@@ -187,7 +377,6 @@ def create_item(
     return MenuItemOut(id=it.id, **body.model_dump() | {"tenant_id": ctx.tenant_id})
 
 
-# NEW: PATCH /items/{item_id}
 @router.patch("/items/{item_id}")
 def patch_item(
     item_id: str,
@@ -197,11 +386,11 @@ def patch_item(
 ):
     """
     Update editable fields on an existing item.
-    Used by the Item Detail page (name, desc, active, stock_out, taxInclusive, gstRate, etc.)
+    Used by Item Detail editor (CatalogRepo.updateItem()).
     """
     it = _ensure_item_access(db, item_id, ctx)
 
-    # if category is changing, validate new category belongs to same tenant/branch scope
+    # If category is changing, validate target category is still in-scope.
     if "category_id" in body and body["category_id"]:
         _ensure_category_access(db, str(body["category_id"]), ctx)
 
@@ -217,6 +406,7 @@ def patch_item(
         "tax_inclusive",
         "gst_rate",
         "kitchen_station_id",
+        "image_url",  # let PATCH set/clear if you already uploaded
     ]
     for fld in updatable_fields:
         if fld in body:
@@ -259,7 +449,7 @@ def set_stock_out(
 @router.post("/items/{item_id}/assign_station")
 def assign_station(
     item_id: str,
-    station_id: str | None,
+    station_id: Optional[str] = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
@@ -279,7 +469,7 @@ def update_tax(
 ):
     """
     Keeps backward-compat with existing frontend which calls updateItemTax().
-    Newer UI may just PATCH /items/{id}, but we keep this endpoint too.
+    Newer UI may just PATCH /items/{id}.
     """
     it = _ensure_item_access(db, item_id, ctx)
     it.gst_rate = gst_rate
@@ -292,7 +482,9 @@ def update_tax(
     }
 
 
-# ---------- VARIANTS ----------
+# -----------------------------------------------------------------------------
+# VARIANTS
+# -----------------------------------------------------------------------------
 
 @router.get("/variants")
 def list_variants(
@@ -318,7 +510,7 @@ def list_variants(
 def create_variant(
     body: VariantIn,
     db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
     Create a variant. If is_default=True, unset any existing default for that item.
@@ -346,16 +538,15 @@ def create_variant(
     return VariantOut(id=v.id, **data)
 
 
-# NEW: PATCH /variants/{variant_id}
 @router.patch("/variants/{variant_id}")
 def update_variant(
     variant_id: str,
     body: dict,
     db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
-    Edit label / prices / default flag for a variant.
+    Edit label / prices / default flag / image_url for a variant.
     Called by ManageVariantsSheet -> 'Edit'.
     """
     v: ItemVariant | None = db.get(ItemVariant, variant_id)
@@ -365,14 +556,20 @@ def update_variant(
     # tenant/branch scope via the parent item
     _ensure_item_access(db, v.item_id, ctx)
 
-    # if caller wants to make THIS variant default, unset all others first
+    # If caller wants to make THIS variant default, unset all others first.
     if body.get("is_default") is True:
         db.query(ItemVariant).filter(
             ItemVariant.item_id == v.item_id
         ).update({"is_default": False})
 
-    # allowed fields to patch
-    for fld in ["label", "mrp", "base_price", "is_default"]:
+    allowed_fields = [
+        "label",
+        "mrp",
+        "base_price",
+        "is_default",
+        "image_url",
+    ]
+    for fld in allowed_fields:
         if fld in body:
             setattr(v, fld, body[fld])
 
@@ -381,16 +578,228 @@ def update_variant(
     return _variant_payload(v)
 
 
-# NEW: DELETE /variants/{variant_id}
 @router.delete("/variants/{variant_id}")
 def delete_variant(
     variant_id: str,
     db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Hard-delete or soft-delete a variant.
+    CatalogRepo.deleteVariant() calls this.
+    """
+    v: ItemVariant | None = db.get(ItemVariant, variant_id)
+    if not v:
+        # deleting a missing variant shouldn't explode in UI
+        return {"ok": True, "id": variant_id}
+
+    _ensure_item_access(db, v.item_id, ctx)
+
+    # If you prefer soft delete, add deleted_at instead of delete().
+    db.delete(v)
+    db.commit()
+    return {"ok": True, "id": variant_id}
+
+
+# -----------------------------------------------------------------------------
+# MODIFIER GROUPS / MODIFIERS
+# -----------------------------------------------------------------------------
+
+@router.post("/modifier_groups")
+def create_modifier_group(
+    body: dict,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Create a ModifierGroup.
+    CatalogRepo.createModifierGroup() calls this with ModifierGroup.toJson().
+    Expected body keys:
+      tenant_id (ignored/overridden),
+      name,
+      min_sel,
+      max_sel,
+      required
+    """
+    # force it into the current tenant
+    mg = ModifierGroup(
+        tenant_id=ctx.tenant_id,
+        name=body.get("name", ""),
+        min_sel=body.get("min_sel", 0),
+        max_sel=body.get("max_sel"),
+        required=bool(body.get("required", False)),
+    )
+    db.add(mg)
+    db.commit()
+    db.refresh(mg)
+
+    return {
+        "id": mg.id,
+        "tenant_id": mg.tenant_id,
+        "name": mg.name,
+        "min_sel": mg.min_sel,
+        "max_sel": mg.max_sel,
+        "required": bool(mg.required),
+    }
+
+
+@router.post("/modifiers")
+def create_modifier(
+    body: dict,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Create a Modifier option inside a ModifierGroup.
+    CatalogRepo.createModifier() calls this with Modifier.toJson().
+    Expected body keys:
+      group_id,
+      name,
+      price_delta
+    """
+    group_id = body.get("group_id")
+    if not group_id:
+        raise HTTPException(status_code=400, detail="group_id required")
+
+    grp = db.get(ModifierGroup, group_id)
+    if not grp or grp.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="modifier group not found")
+
+    mod = Modifier(
+        group_id=group_id,
+        name=body.get("name", ""),
+        price_delta=body.get("price_delta", 0),
+    )
+    db.add(mod)
+    db.commit()
+    db.refresh(mod)
+
+    return _modifier_payload(mod)
+
+
+@router.post("/items/{item_id}/modifier_groups")
+def link_item_modifier_group(
+    item_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Link a ModifierGroup to an item.
+    CatalogRepo.linkItemModifierGroup() posts { "group_id": "..."}.
+    """
+    it = _ensure_item_access(db, item_id, ctx)
+
+    group_id = body.get("group_id")
+    if not group_id:
+        raise HTTPException(status_code=400, detail="group_id required")
+
+    grp = db.get(ModifierGroup, group_id)
+    if not grp or grp.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=404, detail="modifier group not found")
+
+    # ensure not already linked
+    existing = (
+        db.query(ItemModifierGroup)
+        .filter(
+            ItemModifierGroup.item_id == it.id,
+            ItemModifierGroup.group_id == grp.id,
+        )
+        .first()
+    )
+    if not existing:
+        link = ItemModifierGroup(item_id=it.id, group_id=grp.id)
+        db.add(link)
+        db.commit()
+
+    return {"ok": True, "item_id": it.id, "group_id": grp.id}
+
+
+@router.get("/items/{item_id}/modifiers_full")
+def get_item_modifier_groups_full(
+    item_id: str,
+    db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
     """
-    Delete variant. If it was default, promote another variant as default.
-    Called by ManageVariantsSheet -> trash icon.
+    Return all modifier groups (and their modifiers[]) attached to this item.
+    ApiClient.fetchItemModifierGroups() uses this.
+    """
+    it = _ensure_item_access(db, item_id, ctx)
+
+    # find all groups linked to this item
+    groups: List[ModifierGroup] = (
+        db.query(ModifierGroup)
+        .join(ItemModifierGroup, ItemModifierGroup.group_id == ModifierGroup.id)
+        .filter(ItemModifierGroup.item_id == it.id)
+        .filter(ModifierGroup.tenant_id == ctx.tenant_id)
+        .all()
+    )
+
+    out = []
+    for grp in groups:
+        mods = (
+            db.query(Modifier)
+            .filter(Modifier.group_id == grp.id)
+            .order_by(Modifier.name.asc())
+            .all()
+        )
+        out.append(_modifier_group_block(grp, mods))
+
+    return out
+
+
+# -----------------------------------------------------------------------------
+# IMAGES (items / variants)
+# -----------------------------------------------------------------------------
+
+@router.post("/items/{item_id}/image")
+def upload_item_image(
+    item_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Upload an item image. Flutter calls ApiClient.uploadItemImage(), which
+    expects { "image_url": "<...>" } back.
+    """
+    it = _ensure_item_access(db, item_id, ctx)
+
+    img_url = _save_upload_and_get_url("items", item_id, file)
+    it.image_url = img_url
+    db.commit()
+    return {"image_url": img_url}
+
+
+@router.delete("/items/{item_id}/image")
+def delete_item_image(
+    item_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Clear image_url for this item. Flutter calls ApiClient.deleteItemImage().
+    """
+    it = _ensure_item_access(db, item_id, ctx)
+
+    # optionally also os.remove() the file on disk if you want cleanup.
+    # We'll just null out the DB field here.
+    it.image_url = None
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/variants/{variant_id}/image")
+def upload_variant_image(
+    variant_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Upload an image for a specific variant.
+    ApiClient.uploadVariantImage() expects { "image_url": "<...>" }.
     """
     v: ItemVariant | None = db.get(ItemVariant, variant_id)
     if not v:
@@ -398,271 +807,28 @@ def delete_variant(
 
     _ensure_item_access(db, v.item_id, ctx)
 
-    item_id = v.item_id
-    was_default = bool(v.is_default)
-
-    db.delete(v)
+    img_url = _save_upload_and_get_url("variants", variant_id, file)
+    v.image_url = img_url
     db.commit()
-
-    if was_default:
-        # pick another variant and mark it default
-        others: List[ItemVariant] = (
-            db.query(ItemVariant)
-            .filter(ItemVariant.item_id == item_id)
-            .order_by(ItemVariant.label.asc())
-            .all()
-        )
-        if others:
-            others[0].is_default = True
-            db.commit()
-
-    return {"ok": True, "id": variant_id}
+    return {"image_url": img_url}
 
 
-# ---------- CATEGORIES ----------
-
-@router.post("/categories", response_model=MenuCategoryOut)
-def create_category(
-    body: MenuCategoryIn,
-    db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
-):
-    # normalize & enforce tenant/branch
-    eff_branch = _effective_branch_id(db, ctx, body.branch_id)
-    data = body.model_dump()
-    data["tenant_id"] = ctx.tenant_id
-    data["branch_id"] = eff_branch
-
-    cat = MenuCategory(**data)
-    db.add(cat)
-    db.commit()
-    db.refresh(cat)
-    return MenuCategoryOut(id=cat.id, **data)
-
-
-@router.get("/categories", response_model=List[MenuCategoryOut])
-def list_categories(
-    tenant_id: str,
-    branch_id: str,
-    db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
-):
-    # tenant isolation — ignore mismatched query attempts
-    if tenant_id != ctx.tenant_id:
-        return []
-
-    eff_branch = _effective_branch_id(db, ctx, branch_id)
-
-    rows = (
-        db.query(MenuCategory)
-        .filter(
-            MenuCategory.tenant_id == ctx.tenant_id,
-            MenuCategory.branch_id == eff_branch,
-            MenuCategory.deleted_at.is_(None),
-        )
-        .order_by(MenuCategory.position)
-        .all()
-    )
-    return [
-        MenuCategoryOut(
-            id=r.id,
-            tenant_id=r.tenant_id,
-            branch_id=r.branch_id,
-            name=r.name,
-            position=r.position,
-        )
-        for r in rows
-    ]
-
-
-# NEW: PATCH /categories/{cat_id}
-@router.patch("/categories/{cat_id}", response_model=MenuCategoryOut)
-def patch_category(
-    cat_id: str,
-    body: dict,
+@router.delete("/variants/{variant_id}/image")
+def delete_variant_image(
+    variant_id: str,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
 ):
     """
-    Update a category's name / position.
-    Used by Edit Category dialog.
+    Remove stored image for a variant.
+    Flutter calls ApiClient.deleteVariantImage().
     """
-    cat = _ensure_category_access(db, cat_id, ctx)
+    v: ItemVariant | None = db.get(ItemVariant, variant_id)
+    if not v:
+        return {"ok": True}
 
-    if "name" in body:
-        cat.name = body["name"]
-    if "position" in body:
-        cat.position = body["position"]
+    _ensure_item_access(db, v.item_id, ctx)
 
+    v.image_url = None
     db.commit()
-    db.refresh(cat)
-    return MenuCategoryOut(
-        id=cat.id,
-        tenant_id=cat.tenant_id,
-        branch_id=cat.branch_id,
-        name=cat.name,
-        position=cat.position,
-    )
-
-
-@router.delete("/categories/{cat_id}")
-def delete_category(
-    cat_id: str,
-    db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
-):
-    """
-    Soft delete: set deleted_at timestamp.
-    Frontend calls catalogRepo.deleteCategory(id).
-    """
-    cat = _ensure_category_access(db, cat_id, ctx)
-    cat.deleted_at = datetime.utcnow()
-    db.commit()
-    return {"ok": True, "id": cat_id}
-
-
-# ---------- MODIFIERS / GROUPS ----------
-
-@router.post("/modifier_groups")
-def create_modifier_group(
-    body: dict,
-    db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
-):
-    """
-    body: {tenant_id: str, name: str, min_sel: int, max_sel: int}
-    """
-    data = dict(body)
-    data["tenant_id"] = ctx.tenant_id  # force to caller's tenant
-    mg = ModifierGroup(**data)
-    db.add(mg)
-    db.commit()
-    db.refresh(mg)
-    return {"id": mg.id}
-
-
-@router.post("/modifiers")
-def create_modifier(
-    body: dict,
-    db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
-):
-    """
-    body: {group_id: str, name: str, price_delta: float}
-    """
-    group_id = body.get("group_id")
-    grp: ModifierGroup | None = db.get(ModifierGroup, group_id)
-    if not grp or grp.tenant_id != ctx.tenant_id:
-        raise HTTPException(404, detail="modifier group not found")
-    m = Modifier(**body)
-    db.add(m)
-    db.commit()
-    db.refresh(m)
-    return {"id": m.id}
-
-
-@router.get("/items/{item_id}/modifiers_full")
-def get_item_modifiers_full(
-    item_id: str,
-    db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
-):
-    """
-    Return all modifier groups linked to this item AND the modifiers in each group.
-
-    Shape is friendly for Flutter:
-    [
-      {
-        "group_id": "...",
-        "name": "Toppings",
-        "required": false,
-        "min_sel": 0,
-        "max_sel": 3,
-        "modifiers": [
-          {"id": "...", "name": "Extra Cheese", "price_delta": 20.0},
-          {"id": "...", "name": "No Onion", "price_delta": 0.0},
-          ...
-        ]
-      },
-      ...
-    ]
-    """
-    # enforce item access
-    _ensure_item_access(db, item_id, ctx)
-
-    # find modifier groups linked to this item and scoped to tenant
-    groups: List[ModifierGroup] = (
-        db.query(ModifierGroup)
-        .join(
-            ItemModifierGroup,
-            ItemModifierGroup.group_id == ModifierGroup.id,
-        )
-        .filter(
-            ItemModifierGroup.item_id == item_id,
-            ModifierGroup.tenant_id == ctx.tenant_id,
-        )
-        .all()
-    )
-
-    result = []
-    for g in groups:
-        # load all modifiers in that group
-        mods: List[Modifier] = (
-            db.query(Modifier)
-            .filter(Modifier.group_id == g.id)
-            .all()
-        )
-
-        result.append(
-            {
-                "group_id": g.id,
-                "name": g.name,
-                "required": bool(getattr(g, "required", False)),
-                "min_sel": getattr(g, "min_sel", 0) or 0,
-                "max_sel": getattr(g, "max_sel", None),
-                "modifiers": [
-                    {
-                        "id": m.id,
-                        "name": m.name,
-                        "price_delta": _as_float(m.price_delta) or 0.0,
-                    }
-                    for m in mods
-                ],
-            }
-        )
-
-    return result
-
-
-@router.post("/items/{item_id}/modifier_groups")
-def link_item_group(
-    item_id: str,
-    body: dict,
-    db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_auth),
-):
-    """
-    body: {group_id: str}
-    """
-    # item must be in my tenant/branch
-    _ensure_item_access(db, item_id, ctx)
-
-    group_id = (body or {}).get("group_id")
-    grp: ModifierGroup | None = db.get(ModifierGroup, group_id)
-    if not grp or grp.tenant_id != ctx.tenant_id:
-        raise HTTPException(404, detail="modifier group not found")
-
-    exists = (
-        db.query(ItemModifierGroup)
-        .filter(
-            ItemModifierGroup.item_id == item_id,
-            ItemModifierGroup.group_id == group_id,
-        )
-        .first()
-    )
-    if not exists:
-        link = ItemModifierGroup(item_id=item_id, group_id=group_id)
-        db.add(link)
-        db.commit()
-        return {"ok": True, "linked": True}
-    return {"ok": True, "linked": False}
+    return {"ok": True}
