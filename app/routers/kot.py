@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import select
 from datetime import datetime, timezone
 import httpx
+from typing import List, Dict, Any, Optional
 
 from app.db import get_db
 from app.deps import AuthCtx, require_auth, require_perm
@@ -11,7 +11,6 @@ from app.models.core import (
     KitchenTicket,
     KitchenTicketItem,
     KitchenStation,
-    KitchenTicketItem,
     KOTStatus,
     Order,
     OrderItem,
@@ -44,15 +43,18 @@ def _ensure_order_access(db: Session, order_id: str, ctx: AuthCtx) -> Order:
     o = db.get(Order, order_id)
     if not o:
         raise HTTPException(status_code=404, detail="order not found")
-    # tenant scope (if model has tenant_id)
+
+    # tenant scope
     tenant_id = getattr(o, "tenant_id", None)
     if tenant_id is not None and tenant_id != ctx.tenant_id:
         raise HTTPException(status_code=404, detail="order not found")
-    # branch scope (if model has branch_id and ctx has one)
+
+    # branch scope
     if ctx.branch_id:
         order_branch = getattr(o, "branch_id", None)
         if order_branch is not None and order_branch != ctx.branch_id:
             raise HTTPException(status_code=404, detail="order not found")
+
     return o
 
 
@@ -64,30 +66,46 @@ def _ensure_ticket_access(db: Session, ticket_id: str, ctx: AuthCtx) -> KitchenT
     return t
 
 
-def _ensure_station_access(db: Session, station_id: str | None, ctx: AuthCtx) -> None:
+def _ensure_station_access(db: Session, station_id: Optional[str], ctx: AuthCtx) -> None:
+    """
+    Make sure the requested kitchen station (Indian / Chinese / etc) is valid
+    and belongs to the same tenant/branch.
+    """
     if not station_id:
         return
     st = db.get(KitchenStation, station_id)
     if not st:
         raise HTTPException(status_code=404, detail="station not found")
-    # tenant/branch checks if present on model
+
     st_tenant = getattr(st, "tenant_id", None)
     if st_tenant is not None and st_tenant != ctx.tenant_id:
         raise HTTPException(status_code=404, detail="station not found")
+
     if ctx.branch_id:
         st_branch = getattr(st, "branch_id", None)
         if st_branch is not None and st_branch != ctx.branch_id:
             raise HTTPException(status_code=404, detail="station not found")
 
 
-def _gather_station_lines(db: Session, order_id: str, station_id: str | None, ctx: AuthCtx | None = None):
+def _gather_station_lines(
+    db: Session,
+    order_id: str,
+    station_id: Optional[str],
+    ctx: Optional[AuthCtx] = None,
+) -> List[Dict[str, Any]]:
     """
-    Collect KOT line items for a specific kitchen station.
-    Each line has:
-      - item name
-      - qty
-      - modifiers list (extra cheese, no onion, etc.)
+    Collect all order lines that belong to `station_id` (kitchen station).
+    We ALSO return each line's DB id so we can snapshot it into KitchenTicketItem.
+    Returned dict per line:
+        {
+            "order_item_id": "<uuid of order_item row>",
+            "name": "Paneer Chilli",
+            "qty": 2.0,
+            "mods": ["Extra Spicy", "No Onion x2"]
+        }
     """
+
+    # Base query: order items joined with menu items
     q = (
         db.query(
             OrderItem,
@@ -98,22 +116,23 @@ def _gather_station_lines(db: Session, order_id: str, station_id: str | None, ct
         .filter(OrderItem.order_id == order_id)
     )
 
-    # Restrict to tenant/branch via item's category (MenuItem has no branch_id)
+    # Enforce tenant/branch via MenuCategory so one branch
+    # can't see/order another branch's prep list
     if ctx is not None:
         q = q.join(MenuCategory, MenuCategory.id == MenuItem.category_id)
         q = q.filter(MenuCategory.tenant_id == ctx.tenant_id)
         if ctx.branch_id:
             q = q.filter(MenuCategory.branch_id == ctx.branch_id)
 
-    # Only send lines that belong to this station (Indian, Chinese, etc.)
+    # Limit lines to this specific kitchen station if provided
     if station_id:
         q = q.filter(MenuItem.kitchen_station_id == station_id)
 
     rows = q.all()
 
-    lines_payload = []
+    out_lines: List[Dict[str, Any]] = []
     for line, item_name, _station_id in rows:
-        # modifiers for this line
+        # modifiers for this specific order_item line
         mods_q = (
             db.query(
                 OrderItemModifier,
@@ -124,48 +143,60 @@ def _gather_station_lines(db: Session, order_id: str, station_id: str | None, ct
         )
         mods_rows = mods_q.all()
 
-        mods_list: list[str] = []
+        mods_list: List[str] = []
         for om, mod_name in mods_rows:
-            # include qty if >1, keep it simple for kitchen
             qty_suffix = ""
-            if getattr(om, "qty", 1) and getattr(om, "qty", 1) != 1:
-                qty_suffix = f" x{om.qty}"
+            this_qty = getattr(om, "qty", 1)
+            if this_qty and this_qty != 1:
+                qty_suffix = f" x{this_qty}"
             mods_list.append(f"{mod_name}{qty_suffix}")
 
-        lines_payload.append(
+        out_lines.append(
             {
+                "order_item_id": line.id,           # IMPORTANT for KitchenTicketItem FK
                 "name": item_name,
                 "qty": float(line.qty or 0),
                 "mods": mods_list,
             }
         )
 
-    return lines_payload
+    return out_lines
 
 
-def _build_kot_payload(db: Session, t: KitchenTicket, ctx: AuthCtx | None = None) -> dict:
+def _build_kot_payload(
+    db: Session,
+    t: KitchenTicket,
+    ctx: Optional[AuthCtx] = None,
+) -> tuple[dict, Optional[str], Optional[str], Optional[str], Optional[str], Optional[Order]]:
     """
-    Build the payload we send to the kitchen printer for this ticket.
-    Includes table, waiter, time, and notes.
+    Build the printable payload for this kitchen ticket `t`.
+    Includes table, waiter, timestamp, and line items.
     """
 
     order = db.get(Order, t.order_id)
     if not order:
-        # minimal fallback
-        return {
-            "type": "KOT",
-            "ticket_id": t.id,
-            "ticket_no": t.ticket_no,
-            "station": None,
-            "order_no": None,
-            "table": None,
-            "waiter": None,
-            "time": datetime.now(timezone.utc).isoformat(),
-            "note": None,
-            "lines": [],
-        }, None, None, None, None, None
+        # fallback payload if order somehow missing (shouldn't really happen)
+        return (
+            {
+                "type": "KOT",
+                "ticket_id": t.id,
+                "ticket_no": t.ticket_no,
+                "station": None,
+                "order_no": None,
+                "table": None,
+                "waiter": None,
+                "time": datetime.now(timezone.utc).isoformat(),
+                "note": None,
+                "lines": [],
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
-    # table code
+    # dining table code on ticket
     table_code = None
     if order.table_id:
         tbl = db.get(DiningTable, order.table_id)
@@ -179,21 +210,30 @@ def _build_kot_payload(db: Session, t: KitchenTicket, ctx: AuthCtx | None = None
         if u:
             waiter_name = u.name
 
-    # station info
-    station = None
+    # station / printer
     station_name = None
     printer_url = None
     if t.target_station:
-        station = db.get(KitchenStation, t.target_station)
-        if station:
-            station_name = station.name
-            if station.printer_id:
-                pr = db.get(Printer, station.printer_id)
+        st = db.get(KitchenStation, t.target_station)
+        if st:
+            station_name = st.name
+            if st.printer_id:
+                pr = db.get(Printer, st.printer_id)
                 if pr and pr.connection_url:
                     printer_url = pr.connection_url
 
-    # build line items only for this station (with tenant/branch scope if ctx given)
-    line_payloads = _gather_station_lines(db, t.order_id, t.target_station, ctx)
+    # build line items for this station
+    raw_lines = _gather_station_lines(db, t.order_id, t.target_station, ctx)
+
+    # For the printed slip, we don't expose order_item_id
+    line_payloads = [
+        {
+            "name": ln["name"],
+            "qty": ln["qty"],
+            "mods": ln["mods"],
+        }
+        for ln in raw_lines
+    ]
 
     payload = {
         "type": "KOT",
@@ -215,21 +255,25 @@ def _build_kot_payload(db: Session, t: KitchenTicket, ctx: AuthCtx | None = None
 async def create_ticket(
     order_id: str,
     ticket_no: int,
-    target_station: str | None = None,
+    target_station: Optional[str] = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
     """
     Create a kitchen ticket for a station (e.g. 'Indian', 'Chinese').
-    Immediately print to that station's printer.
+    1. Insert KitchenTicket
+    2. Snapshot each line (OrderItem) into KitchenTicketItem with FK order_item_id
+    3. Print
+    4. Audit
     """
 
-    # scope checks
+    # --- access checks ------------------------------------------------------
     _ensure_order_access(db, order_id, ctx)
     _ensure_station_access(db, target_station, ctx)
 
     now = datetime.now(timezone.utc)
 
+    # --- create the ticket row ---------------------------------------------
     t = KitchenTicket(
         order_id=order_id,
         ticket_no=ticket_no,
@@ -238,34 +282,38 @@ async def create_ticket(
         printed_at=now,
     )
     db.add(t)
-    db.commit()
+    db.commit()     # so t.id is persisted
     db.refresh(t)
 
-    # snapshot ticket lines into KitchenTicketItem rows for audit
+    # --- snapshot the current lines for auditability -----------------------
     station_lines = _gather_station_lines(db, order_id, target_station, ctx)
     for ln in station_lines:
+        # Save modifiers ("No Onion", "Extra Cheese") into note, comma separated.
+        note_text = ", ".join(ln["mods"]) if ln["mods"] else None
+
         kti = KitchenTicketItem(
             ticket_id=t.id,
-            # we don't strictly need to copy order_item_id here unless we want,
-            # but we'll leave order_item_id null-safe to avoid FK break if not known.
-            order_item_id=None,
+            order_item_id=ln["order_item_id"],   # <-- FIX: no more NULL
             qty=ln["qty"],
-            note=None,
+            note=note_text,
         )
         db.add(kti)
 
-    # build payload and send to printer agent
-    payload, printer_url, station_name, table_code, waiter_name, order = _build_kot_payload(
+    # flush so we catch any constraint issues (like NOT NULL) before printing
+    db.flush()
+
+    # --- build payload and try to print ------------------------------------
+    payload, printer_url, _station_name, _table_code, _waiter_name, _order = _build_kot_payload(
         db, t, ctx
     )
 
     if printer_url:
         await _post_agent(printer_url, payload)
 
-    # audit log (PRINT_KOT)
+    # --- audit log ---------------------------------------------------------
     db.add(
         AuditLog(
-            actor_user_id=str(getattr(ctx, "user_id", "")),
+            actor_user_id=ctx.user_id,  # must not be NULL for audit_log.actor_user_id
             entity="KitchenTicket",
             entity_id=t.id,
             action="PRINT_KOT",
@@ -274,6 +322,7 @@ async def create_ticket(
             after=None,
         )
     )
+
     db.commit()
 
     return {
@@ -284,30 +333,31 @@ async def create_ticket(
 
 @router.get("/tickets")
 def list_tickets(
-    status: str | None = None,
+    status: Optional[str] = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
     """
-    List kitchen tickets, optionally filtered by status.
-    Used by the kitchen screen (New / In Progress / Ready).
+    List kitchen tickets for this tenant/branch, optionally filtered by status.
+    Used by the kitchen screen tabs: NEW / IN_PROGRESS / READY.
     """
 
-    # Scope tickets via their orders to caller's tenant/branch
     q = db.query(KitchenTicket).join(Order, Order.id == KitchenTicket.order_id)
+
+    # Tenant/branch scoping
     if hasattr(Order, "tenant_id"):
         q = q.filter(Order.tenant_id == ctx.tenant_id)
     if ctx.branch_id and hasattr(Order, "branch_id"):
         q = q.filter(Order.branch_id == ctx.branch_id)
 
+    # Optional status filter
     if status:
         try:
             st_enum = KOTStatus[status]
         except KeyError:
-            raise HTTPException(400, detail="bad status")
+            raise HTTPException(status_code=400, detail="bad status")
         q = q.filter(KitchenTicket.status == st_enum)
 
-    # show newest first
     q = q.order_by(KitchenTicket.ticket_no.desc())
     tickets = q.all()
 
@@ -316,7 +366,6 @@ def list_tickets(
         payload, _printer_url, station_name, table_code, waiter_name, order = _build_kot_payload(
             db, t, ctx
         )
-
         out.append(
             {
                 "id": t.id,
@@ -355,11 +404,11 @@ def update_ticket_status(
         try:
             t.status = KOTStatus[new_status]
         except KeyError:
-            raise HTTPException(400, detail="bad status")
+            raise HTTPException(status_code=400, detail="bad status")
 
     db.add(
         AuditLog(
-            actor_user_id=str(getattr(ctx, "user_id", "")),
+            actor_user_id=ctx.user_id,
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="STATUS_CHANGE",
@@ -379,9 +428,9 @@ def update_ticket_status(
 
 
 @router.post("/{ticket_id}/reprint")
-async def reprint(
+async def reprint_ticket(
     ticket_id: str,
-    reason: str | None = None,
+    reason: Optional[str] = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_perm("REPRINT")),
 ):
@@ -397,13 +446,13 @@ async def reprint(
     if printer_url:
         await _post_agent(printer_url, payload)
 
-    # bump reprint_count + audit
+    # bump counter
     if hasattr(t, "reprint_count"):
         t.reprint_count = (t.reprint_count or 0) + 1
 
     db.add(
         AuditLog(
-            actor_user_id=str(getattr(ctx, "user_id", "")),
+            actor_user_id=ctx.user_id,
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="REPRINT",
@@ -412,6 +461,7 @@ async def reprint(
             after=None,
         )
     )
+
     db.commit()
 
     return {
@@ -421,14 +471,14 @@ async def reprint(
 
 
 @router.post("/{ticket_id}/cancel")
-def cancel(
+def cancel_ticket(
     ticket_id: str,
-    reason: str | None = None,
+    reason: Optional[str] = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_perm("VOID")),
 ):
     """
-    Cancel a kitchen ticket. Status -> CANCELLED.
+    Cancel a KOT. Marks status -> CANCELLED and records the reason.
     """
 
     t = _ensure_ticket_access(db, ticket_id, ctx)
@@ -439,7 +489,7 @@ def cancel(
 
     db.add(
         AuditLog(
-            actor_user_id=str(getattr(ctx, "user_id", "")),
+            actor_user_id=ctx.user_id,
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="CANCEL",
@@ -448,6 +498,7 @@ def cancel(
             after=None,
         )
     )
+
     db.commit()
 
     return {"ok": True, "status": "CANCELLED"}
