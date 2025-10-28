@@ -39,6 +39,7 @@ app.add_middleware(
 )
 
 # Include routers
+app.include_router(media.router)
 app.include_router(onboard.router)
 app.include_router(auth.router)
 app.include_router(identity.router)
@@ -50,7 +51,6 @@ app.include_router(admin.router)
 app.include_router(settings_router.router)
 app.include_router(backup.router)
 app.include_router(reports.router)
-app.include_router(media.router)
 app.include_router(inventory.router)
 app.include_router(shift.router)
 app.include_router(printjob.router)
