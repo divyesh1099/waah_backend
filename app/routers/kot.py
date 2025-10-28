@@ -265,7 +265,7 @@ async def create_ticket(
     # audit log (PRINT_KOT)
     db.add(
         AuditLog(
-            actor_user_id=getattr(ctx, "sub", None),
+            actor_user_id=str(getattr(ctx, "user_id", "")),
             entity="KitchenTicket",
             entity_id=t.id,
             action="PRINT_KOT",
@@ -359,7 +359,7 @@ def update_ticket_status(
 
     db.add(
         AuditLog(
-            actor_user_id=getattr(ctx, "sub", None),
+            actor_user_id=str(getattr(ctx, "user_id", "")),
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="STATUS_CHANGE",
@@ -403,7 +403,7 @@ async def reprint(
 
     db.add(
         AuditLog(
-            actor_user_id=getattr(ctx, "sub", None),
+            actor_user_id=str(getattr(ctx, "user_id", "")),
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="REPRINT",
@@ -439,7 +439,7 @@ def cancel(
 
     db.add(
         AuditLog(
-            actor_user_id=getattr(ctx, "sub", None),
+            actor_user_id=str(getattr(ctx, "user_id", "")),
             entity="KitchenTicket",
             entity_id=ticket_id,
             action="CANCEL",
