@@ -1,6 +1,10 @@
+# -----------------------------------------------------------------------------
+# 2) app/routers/shift.py  (FULL FILE)
+# -----------------------------------------------------------------------------
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
+from typing import Any
 
 from app.db import get_db
 from app.deps import require_auth, require_perm, AuthCtx
@@ -10,13 +14,22 @@ from app.util.audit import audit
 router = APIRouter(prefix="/shift", tags=["shift"])
 
 
-def _user_has_perm(db: Session, user_id: str, code: str) -> bool:
-    """
-    Check if a user has a permission code via any of their roles.
-    Used for manager override on cash mismatch.
-    """
+def _uid(x: Any) -> str:
+    if x is None:
+        return ""
+    for attr in ("user_id", "sub", "id"):
+        if hasattr(x, attr):
+            return str(getattr(x, attr))
+    return str(x)
+
+
+def _user_has_perm(db: Session, user: Any, code: str) -> bool:
+    """Check a permission code via any role for the given user (AuthCtx or str)."""
     from app.models.core import Permission, RolePermission, Role, UserRole
-    perms = (
+    user_id = _uid(user)
+    if not user_id:
+        return False
+    rows = (
         db.query(Permission.code)
         .join(RolePermission, RolePermission.permission_id == Permission.id)
         .join(Role, Role.id == RolePermission.role_id)
@@ -24,22 +37,16 @@ def _user_has_perm(db: Session, user_id: str, code: str) -> bool:
         .filter(UserRole.user_id == user_id)
         .all()
     )
-    return code in {p[0] for p in perms}
+    return code in {r[0] for r in rows}
 
 
 def _assert_branch_ctx(ctx: AuthCtx, branch_id: str):
-    """
-    Enforce branch scoping: if ctx has a branch_id, it must match the requested one.
-    Hide mismatches as 404 to avoid leaking info across branches.
-    """
+    """Enforce branch scoping; mismatch hidden as 404."""
     if ctx.branch_id and ctx.branch_id != branch_id:
         raise HTTPException(404, detail="not found")
 
 
 def _assert_shift_ctx(ctx: AuthCtx, s: Shift | None):
-    """
-    For shift-id based routes, ensure the loaded shift belongs to the caller's branch.
-    """
     if not s:
         raise HTTPException(404, detail="shift not found")
     if ctx.branch_id and s.branch_id != ctx.branch_id:
@@ -52,19 +59,11 @@ def shift_status(
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Returns the *active* (unlocked) shift for this branch with movements
-    and calculated expected cash right now.
-    If no open shift, returns {}.
-    """
     _assert_branch_ctx(ctx, branch_id)
 
     s = (
         db.query(Shift)
-        .filter(
-            Shift.branch_id == branch_id,
-            Shift.locked == False,          # still open
-        )
+        .filter(Shift.branch_id == branch_id, Shift.locked == False)
         .order_by(Shift.opened_at.desc())
         .first()
     )
@@ -72,7 +71,6 @@ def shift_status(
     if not s:
         return {}
 
-    # get movements (cash in/out)
     moves = (
         db.query(CashMovement)
         .filter(CashMovement.shift_id == s.id)
@@ -82,7 +80,6 @@ def shift_status(
 
     payins = sum(float(m.amount or 0) for m in moves if m.kind == "PAYIN")
     payouts = sum(float(m.amount or 0) for m in moves if m.kind == "PAYOUT")
-
     expected_now = float(s.opening_float or 0) + payins - payouts
 
     return {
@@ -95,7 +92,7 @@ def shift_status(
         "movements": [
             {
                 "id": m.id,
-                "kind": m.kind,  # PAYIN or PAYOUT
+                "kind": m.kind,
                 "amount": float(m.amount or 0),
                 "reason": m.reason,
                 "ts": m.created_at,
@@ -104,6 +101,7 @@ def shift_status(
         ],
     }
 
+
 @router.post("/open")
 def open_shift(
     branch_id: str,
@@ -111,10 +109,6 @@ def open_shift(
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Start today's cash drawer / shift for this branch.
-    Only 1 unlocked shift per branch.
-    """
     _assert_branch_ctx(ctx, branch_id)
 
     existing = (
@@ -127,7 +121,7 @@ def open_shift(
 
     s = Shift(
         branch_id=branch_id,
-        opened_by=ctx.user_id,
+        opened_by=_uid(ctx),
         opened_at=datetime.now(timezone.utc),
         opening_float=opening_float,
         locked=False,
@@ -136,14 +130,7 @@ def open_shift(
     db.commit()
     db.refresh(s)
 
-    audit(
-        db,
-        ctx.user_id,
-        "shift",
-        s.id,
-        "OPEN",
-        after={"opening_float": opening_float},
-    )
+    audit(db, _uid(ctx), "shift", s.id, "OPEN", after={"opening_float": opening_float})
     db.commit()
 
     return {"shift_id": s.id}
@@ -155,25 +142,6 @@ def current_shift(
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Return details of the active (not locked) shift for this branch,
-    including cash movements and running expected cash.
-
-    Response:
-    {
-      "shift_id": "...",        # or null if none open
-      "branch_id": "...",
-      "opened_at": "...",
-      "opening_float": 500.0,
-      "locked": false,
-      "expected_now": 620.0,
-      "closed_at": null,
-      "expected_cash_final": null,
-      "actual_cash_final": null,
-      "close_note": null,
-      "movements": [...]
-    }
-    """
     _assert_branch_ctx(ctx, branch_id)
 
     s = (
@@ -184,7 +152,6 @@ def current_shift(
     )
 
     if not s:
-        # no open shift right now
         return {"shift_id": None, "branch_id": branch_id, "movements": []}
 
     mov_rows = (
@@ -194,18 +161,15 @@ def current_shift(
         .all()
     )
 
-    total_in = sum(m.amount for m in mov_rows if m.kind == "PAYIN")
-    total_out = sum(m.amount for m in mov_rows if m.kind == "PAYOUT")
-
-    # NOTE: you probably also want to include CASH payments from /orders/pay here.
-    # Add that to total_in once the payments table is joined.
-    expected_now = float(s.opening_float or 0.0) + float(total_in) - float(total_out)
+    total_in = sum(float(m.amount or 0) for m in mov_rows if m.kind == "PAYIN")
+    total_out = sum(float(m.amount or 0) for m in mov_rows if m.kind == "PAYOUT")
+    expected_now = float(s.opening_float or 0.0) + total_in - total_out
 
     return {
         "shift_id": s.id,
         "branch_id": s.branch_id,
         "opened_at": s.opened_at,
-        "opening_float": s.opening_float,
+        "opening_float": float(s.opening_float or 0.0),
         "locked": bool(s.locked),
         "expected_now": expected_now,
         "closed_at": s.closed_at,
@@ -216,7 +180,7 @@ def current_shift(
             {
                 "id": m.id,
                 "kind": m.kind,
-                "amount": float(m.amount),
+                "amount": float(m.amount or 0),
                 "reason": m.reason,
                 "ts": m.created_at,
             }
@@ -233,32 +197,17 @@ def payin(
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Cash going INTO drawer (top-up, etc.)
-    """
     s = db.get(Shift, shift_id)
     _assert_shift_ctx(ctx, s)
     if s.locked:
         raise HTTPException(400, detail="Shift is not open")
 
-    m = CashMovement(
-        shift_id=shift_id,
-        kind="PAYIN",
-        amount=amount,
-        reason=reason,
-    )
+    m = CashMovement(shift_id=shift_id, kind="PAYIN", amount=amount, reason=reason)
     db.add(m)
     db.commit()
     db.refresh(m)
 
-    audit(
-        db,
-        ctx.user_id,
-        "cash_movement",
-        m.id,
-        "PAYIN",
-        after={"amount": amount, "reason": reason},
-    )
+    audit(db, _uid(ctx), "cash_movement", m.id, "PAYIN", after={"amount": amount, "reason": reason})
     db.commit()
 
     return {"movement_id": m.id}
@@ -272,32 +221,17 @@ def payout(
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Cash going OUT of drawer (petty cash, purchase, etc.)
-    """
     s = db.get(Shift, shift_id)
     _assert_shift_ctx(ctx, s)
     if s.locked:
         raise HTTPException(400, detail="Shift is not open")
 
-    m = CashMovement(
-        shift_id=shift_id,
-        kind="PAYOUT",
-        amount=amount,
-        reason=reason,
-    )
+    m = CashMovement(shift_id=shift_id, kind="PAYOUT", amount=amount, reason=reason)
     db.add(m)
     db.commit()
     db.refresh(m)
 
-    audit(
-        db,
-        ctx.user_id,
-        "cash_movement",
-        m.id,
-        "PAYOUT",
-        after={"amount": amount, "reason": reason},
-    )
+    audit(db, _uid(ctx), "cash_movement", m.id, "PAYOUT", after={"amount": amount, "reason": reason})
     db.commit()
 
     return {"movement_id": m.id}
@@ -310,32 +244,31 @@ def close_shift(
     actual_cash: float,
     note: str | None = None,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SHIFT_CLOSE")),
+    sub: Any = Depends(require_perm("SHIFT_CLOSE")),  # may return AuthCtx
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Close and lock the shift. If mismatch, caller also needs MANAGER_APPROVE.
-    """
+    """Close and lock the shift. If mismatch, caller also needs MANAGER_APPROVE."""
     s = db.get(Shift, shift_id)
     _assert_shift_ctx(ctx, s)
     if s.locked:
         raise HTTPException(409, detail="shift already closed")
 
+    uid = _uid(sub)
     mismatch = float(actual_cash) - float(expected_cash)
-    if mismatch != 0.0 and not _user_has_perm(db, sub, "MANAGER_APPROVE"):
+    if mismatch != 0.0 and not _user_has_perm(db, uid, "MANAGER_APPROVE"):
         raise HTTPException(403, detail="Manager approval required for mismatch")
 
     s.expected_cash = expected_cash
     s.actual_cash = actual_cash
     s.close_note = note
-    s.closed_by = sub
+    s.closed_by = uid
     s.closed_at = datetime.now(timezone.utc)
     s.locked = True
     db.commit()
 
     audit(
         db,
-        sub,
+        uid,
         "shift",
         s.id,
         "CLOSE",
