@@ -2,20 +2,35 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
 
 from app.middleware import RequestIdMiddleware
 from app.db import Base, engine
-from app.config import settings, MEDIA_ROOT_PATH, MEDIA_URL_PREFIX
+from app.config import MEDIA_ROOT_PATH, MEDIA_URL_PREFIX
 
 # Routers
 from app.routers import (
-    identity, onboard, auth, dining, menu, orders, sync, kot, admin, users,
-    customers, settings as settings_router, backup, reports, media,
-    inventory, shift, printjob, online
+    identity,
+    onboard,
+    auth,
+    dining,
+    menu,
+    orders,
+    sync,
+    kot,
+    admin,
+    users,
+    customers,
+    settings as settings_router,   # /settings/...
+    backup,
+    reports,
+    media,
+    inventory,
+    shift,
+    print as print_router,         # /print/...   (✅ ensure THIS is imported)
+    online,
 )
 
-app = FastAPI(title="Waah API", version="0.3.0")
+app = FastAPI(title="Waah API", version="0.3.1")
 
 @app.on_event("startup")
 def init_db():
@@ -38,7 +53,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
+# Include routers (order not critical, included for clarity)
 app.include_router(media.router)
 app.include_router(onboard.router)
 app.include_router(auth.router)
@@ -48,12 +63,12 @@ app.include_router(orders.router)
 app.include_router(sync.router)
 app.include_router(kot.router)
 app.include_router(admin.router)
-app.include_router(settings_router.router)
+app.include_router(settings_router.router)  # ✅ /settings/*
 app.include_router(backup.router)
 app.include_router(reports.router)
 app.include_router(inventory.router)
 app.include_router(shift.router)
-app.include_router(printjob.router)
+app.include_router(print_router.router)     # ✅ /print/*
 app.include_router(online.router)
 app.include_router(users.router)
 app.include_router(dining.router)

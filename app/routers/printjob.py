@@ -6,7 +6,7 @@ import httpx
 from decimal import Decimal, ROUND_HALF_UP
 
 from app.db import get_db
-from app.deps import AuthCtx, require_auth  # phase-1: allow any logged-in cashier to print
+from app.deps import AuthCtx, require_auth
 from app.models.core import (
     AuditLog,
     Order,
@@ -26,79 +26,32 @@ from app.services.billing import compute_bill
 
 router = APIRouter(prefix="/print", tags=["print"])
 
-
-# --- helpers ---------------------------------------------------------------
+# ----------------- helpers -----------------
 
 def _money(x) -> float:
-    """Round to 2dp as float for receipts."""
     if x is None:
         x = 0
-    return float(
-        Decimal(str(x)).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_HALF_UP,
-        )
-    )
-
+    return float(Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 async def _post_agent(url: str, payload: dict):
-    """
-    Fire-and-forget POST to local/edge print agent.
-    We swallow errors in Phase-1.
-    """
     try:
         async with httpx.AsyncClient(timeout=3) as client:
             await client.post(url, json=payload)
     except Exception:
-        # printer agent might be offline, we don't crash POS flow
+        # printer agent could be offline; printing shouldn't crash POS flow
         pass
 
-
-def _get_billing_printer(
-    db: Session,
-    tenant_id: str | None,
-    branch_id: str | None,
-):
-    """
-    Look up RestaurantSettings for this (tenant_id, branch_id),
-    then resolve the billing printer row.
-    Returns (rs, printer) or (None, None) if not configured.
-
-    This fixes the "No billing printer configured" 400 for multi-branch:
-    - We don't just do .first() anymore.
-    - We pick the printer wired into RestaurantSettings.billing_printer_id.
-    """
-    if not branch_id:
-        return None, None
-
-    q = (
-        db.query(RestaurantSettings)
-        .filter(RestaurantSettings.branch_id == branch_id)
-    )
-    # if tenant_id is known, narrow by that too
-    if tenant_id:
-        q = q.filter(RestaurantSettings.tenant_id == tenant_id)
-
-    rs = q.first()
-    if not rs or not rs.billing_printer_id:
-        return None, None
-
-    p = db.get(Printer, rs.billing_printer_id)
-    if not p or not p.connection_url:
-        return None, None
-
-    return rs, p
-
+def _ensure_order_access(db: Session, order_id: str, ctx: AuthCtx) -> Order:
+    o = db.get(Order, order_id)
+    if not o:
+        raise HTTPException(404, detail="order not found")
+    if hasattr(o, "tenant_id") and o.tenant_id != ctx.tenant_id:
+        raise HTTPException(404, detail="order not found")
+    if ctx.branch_id and hasattr(o, "branch_id") and o.branch_id != ctx.branch_id:
+        raise HTTPException(404, detail="order not found")
+    return o
 
 def _gather_line_items(db: Session, order_id: str) -> list[dict]:
-    """
-    Build receipt-ready line items:
-    - Item name (with variant label)
-    - qty
-    - unit price
-    - modifiers text
-    - line total after discount
-    """
     rows = (
         db.query(
             OrderItem,
@@ -110,92 +63,52 @@ def _gather_line_items(db: Session, order_id: str) -> list[dict]:
         .filter(OrderItem.order_id == order_id)
         .all()
     )
-
-    line_payloads: list[dict] = []
+    out: list[dict] = []
     for line, item_name, variant_label in rows:
-        # Display name like "Paneer Tikka (Full)"
         disp = item_name or ""
         if variant_label:
             disp = f"{disp} ({variant_label})"
 
-        # Collect modifiers (e.g. "Extra Cheese +20.00")
         mods_rows = (
-            db.query(
-                OrderItemModifier,
-                Modifier.name.label("mod_name"),
-            )
+            db.query(OrderItemModifier, Modifier.name.label("mod_name"))
             .join(Modifier, Modifier.id == OrderItemModifier.modifier_id)
             .filter(OrderItemModifier.order_item_id == line.id)
             .all()
         )
-        mods_list: list[str] = []
+        mods: list[str] = []
         for om, mod_name in mods_rows:
-            delta_txt = ""
-            if getattr(om, "price_delta", 0):
-                delta_txt = f" +{_money(om.price_delta)}"
-            mods_list.append(f"{mod_name}{delta_txt}")
+            delta = _money(getattr(om, "price_delta", 0))
+            mods.append(f"{mod_name}{f' +{delta}' if delta else ''}")
 
         qty = float(line.qty or 0)
-        unit_price = _money(line.unit_price)
-        line_total = _money(
-            qty * unit_price - float(line.line_discount or 0)
-        )
+        unit = _money(line.unit_price)
+        line_total = _money(qty * unit - float(line.line_discount or 0))
 
-        line_payloads.append(
+        out.append(
             {
                 "name": disp,
                 "qty": qty,
-                "unit_price": unit_price,
-                "mods": mods_list,
+                "unit_price": unit,
+                "mods": mods,
                 "line_total": line_total,
                 "discount": _money(line.line_discount or 0),
                 "gst_rate": float(line.gst_rate or 0),
             }
         )
+    return out
 
-    return line_payloads
-
-
-def _build_print_payload(
-    db: Session,
-    order: Order,
-    rs: RestaurantSettings,
-    *,
-    invoice: Invoice | None = None,
-):
-    """
-    The final structure we send to the print agent.
-    Agent (running near the printer) does ESC/POS formatting.
-
-    Includes:
-    - restaurant header (name, GSTIN, phone, optional FSSAI)
-    - order meta (table, pax, timestamps)
-    - line items with modifiers and discounts
-    - money totals (subtotal, tax, grand_total, paid, due)
-    - invoice details (invoice_no, datetime, reprint_count) if provided
-    - footer text
-    """
-
-    # Lines
+def _build_print_payload(db: Session, order: Order, rs: RestaurantSettings, *, invoice: Invoice | None = None):
     lines = _gather_line_items(db, order.id)
-
-    # Totals
-    totals = compute_bill(db, order.id)  # subtotal/tax/total etc.
-    paid_rows = (
-        db.query(Payment)
-        .filter(Payment.order_id == order.id)
-        .all()
-    )
+    totals = compute_bill(db, order.id)
+    paid_rows = db.query(Payment).filter(Payment.order_id == order.id).all()
     paid_sum = sum(float(p.amount or 0) for p in paid_rows)
-    total_amt = float(totals.get("total", 0.0))
-    due_amt = _money(total_amt - paid_sum)
+    due_amt = _money(float(totals.get("total", 0.0)) - paid_sum)
 
-    # Table code for dine-in print
     table_code = None
     if getattr(order, "table_id", None):
         tbl = db.get(DiningTable, order.table_id)
         if tbl:
-            table_code = tbl.code
+            table_code = getattr(tbl, "code", None) or getattr(tbl, "name", None)
 
     payload = {
         "restaurant": {
@@ -203,12 +116,7 @@ def _build_print_payload(
             "address": rs.address,
             "phone": rs.phone,
             "gstin": rs.gstin,
-            # FSSAI only if settings says "print_fssai_on_invoice"
-            "fssai": (
-                rs.fssai
-                if getattr(rs, "print_fssai_on_invoice", False)
-                else None
-            ),
+            "fssai": rs.fssai if getattr(rs, "print_fssai_on_invoice", False) else None,
         },
         "order": {
             "id": order.id,
@@ -229,7 +137,6 @@ def _build_print_payload(
         },
         "footer": getattr(rs, "invoice_footer", None),
     }
-
     if invoice:
         payload["invoice"] = {
             "invoice_id": invoice.id,
@@ -238,24 +145,54 @@ def _build_print_payload(
             "reprint_count": getattr(invoice, "reprint_count", 0),
             "cashier_user_id": getattr(invoice, "cashier_user_id", None),
         }
-
     return payload
 
+def _get_billing_printer(db: Session, tenant_id: str | None, branch_id: str | None):
+    """
+    Resolve the active BILLING printer for a branch with fallbacks:
+      1) RestaurantSettings.billing_printer_id
+      2) Branch default BILLING printer (is_default=True)
+      3) Any BILLING printer for the branch
+    Returns (rs, printer) or (None, None).
+    """
+    if not branch_id:
+        return None, None
 
-# -------- NEW: multi-tenant/branch guards ----------------------------------
+    rs = (
+        db.query(RestaurantSettings)
+        .filter(RestaurantSettings.branch_id == branch_id)
+        .filter(RestaurantSettings.tenant_id == tenant_id if tenant_id else True)
+        .first()
+    )
+    if rs and rs.billing_printer_id:
+        p = db.get(Printer, rs.billing_printer_id)
+        if p and p.connection_url:
+            return rs, p
 
-def _ensure_order_access(db: Session, order_id: str, ctx: AuthCtx) -> Order:
-    order = db.get(Order, order_id)
-    if not order:
-        raise HTTPException(404, detail="order not found")
-    if hasattr(order, "tenant_id") and order.tenant_id != ctx.tenant_id:
-        raise HTTPException(404, detail="order not found")
-    if ctx.branch_id and hasattr(order, "branch_id") and order.branch_id != ctx.branch_id:
-        raise HTTPException(404, detail="order not found")
-    return order
+    p = (
+        db.query(Printer)
+        .filter(Printer.branch_id == branch_id)
+        .filter(Printer.tenant_id == tenant_id if tenant_id else True)
+        .filter(Printer.type == "BILLING")
+        .filter(Printer.is_default == True)  # noqa: E712
+        .first()
+    )
+    if p and p.connection_url:
+        return rs, p
 
+    p = (
+        db.query(Printer)
+        .filter(Printer.branch_id == branch_id)
+        .filter(Printer.tenant_id == tenant_id if tenant_id else True)
+        .filter(Printer.type == "BILLING")
+        .first()
+    )
+    if p and p.connection_url:
+        return rs, p
 
-# --- routes ----------------------------------------------------------------
+    return None, None
+
+# ----------------- routes -----------------
 
 @router.post("/bill/{order_id}")
 async def print_bill(
@@ -264,48 +201,17 @@ async def print_bill(
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Print a pre-invoice bill / customer check.
-    Does NOT allocate invoice_no.
-    Phase-1: any logged-in user can hit this (cashier, waiter, etc.).
-    AuditLog records who did it.
-    """
     order = _ensure_order_access(db, order_id, ctx)
-
-    rs, printer = _get_billing_printer(
-        db,
-        getattr(order, "tenant_id", None),
-        getattr(order, "branch_id", None),
-    )
+    rs, printer = _get_billing_printer(db, getattr(order, "tenant_id", None), getattr(order, "branch_id", None))
     if not rs or not printer:
         raise HTTPException(400, detail="No billing printer configured")
 
-    # Build payload for the print agent
     payload = _build_print_payload(db, order, rs)
+    await _post_agent(printer.connection_url, {"type": "BILL", **payload})
 
-    # Tell agent to print BILL
-    await _post_agent(
-        printer.connection_url,
-        {
-            "type": "BILL",
-            **payload,
-        },
-    )
-
-    # Audit (who printed a bill)
-    db.add(
-        AuditLog(
-            actor_user_id=ctx.user_id,
-            entity="Order",
-            entity_id=order_id,
-            action="PRINT_BILL",
-            reason=reason,
-        )
-    )
+    db.add(AuditLog(actor_user_id=ctx.user_id, entity="Order", entity_id=order_id, action="PRINT_BILL", reason=reason))
     db.commit()
-
     return {"printed": True}
-
 
 @router.post("/invoice/{invoice_id}")
 async def print_invoice(
@@ -314,60 +220,24 @@ async def print_invoice(
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Print a tax invoice (final bill).
-    - Includes invoice_no, GST breakdown, footer, etc.
-    - Increments invoice.reprint_count.
-    - Logs in AuditLog.
-    Phase-1: permission check is just 'require_auth'.
-    """
     inv = db.get(Invoice, invoice_id)
     if not inv:
         raise HTTPException(404, detail="invoice not found")
-
     order = _ensure_order_access(db, inv.order_id, ctx)
 
-    rs, printer = _get_billing_printer(
-        db,
-        getattr(order, "tenant_id", None),
-        getattr(order, "branch_id", None),
-    )
+    rs, printer = _get_billing_printer(db, getattr(order, "tenant_id", None), getattr(order, "branch_id", None))
     if not rs or not printer:
         raise HTTPException(400, detail="No billing printer configured")
 
-    # Build payload including invoice block
     payload = _build_print_payload(db, order, rs, invoice=inv)
+    await _post_agent(printer.connection_url, {"type": "INVOICE", **payload})
 
-    # Send to agent
-    await _post_agent(
-        printer.connection_url,
-        {
-            "type": "INVOICE",
-            **payload,
-        },
-    )
-
-    # bump reprint_count and audit log
     if hasattr(inv, "reprint_count"):
         inv.reprint_count = (inv.reprint_count or 0) + 1
 
-    db.add(
-        AuditLog(
-            actor_user_id=ctx.user_id,
-            entity="Invoice",
-            entity_id=invoice_id,
-            action="PRINT_INVOICE",
-            reason=reason,
-        )
-    )
-
+    db.add(AuditLog(actor_user_id=ctx.user_id, entity="Invoice", entity_id=invoice_id, action="PRINT_INVOICE", reason=reason))
     db.commit()
-
-    return {
-        "printed": True,
-        "reprint_count": getattr(inv, "reprint_count", None),
-    }
-
+    return {"printed": True, "reprint_count": getattr(inv, "reprint_count", None)}
 
 @router.post("/open_drawer")
 async def open_drawer(
@@ -376,58 +246,29 @@ async def open_drawer(
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
-    """
-    Pop the cash drawer connected to the BILLING printer.
-    - If tenant_id/branch_id is provided, we use that branch's billing printer.
-    - Otherwise prefer ctx.branch_id; finally fall back to "first RestaurantSettings that
-      has a billing_printer_id", which keeps your old behavior working.
-    """
+    eff_tenant = tenant_id or ctx.tenant_id
+    eff_branch = branch_id or ctx.branch_id
+
     rs = None
     printer = None
 
-    # Prefer branch from context when not explicitly provided
-    eff_tenant_id = tenant_id or ctx.tenant_id
-    eff_branch_id = branch_id or ctx.branch_id
-
-    if eff_branch_id:
-        # verify branch belongs to tenant
-        br = db.get(Branch, eff_branch_id)
-        if (not br) or (hasattr(br, "tenant_id") and br.tenant_id != eff_tenant_id):
+    if eff_branch:
+        br = db.get(Branch, eff_branch)
+        if (not br) or (hasattr(br, "tenant_id") and br.tenant_id != eff_tenant):
             raise HTTPException(404, detail="branch not found")
-
-        rs, printer = _get_billing_printer(db, eff_tenant_id, eff_branch_id)
+        rs, printer = _get_billing_printer(db, eff_tenant, eff_branch)
 
     if not rs or not printer:
-        # Fallback: old behavior = "first configured billing_printer"
-        rs = (
-            db.query(RestaurantSettings)
-            .filter(RestaurantSettings.billing_printer_id.isnot(None))
-            .first()
-        )
+        rs = db.query(RestaurantSettings).filter(RestaurantSettings.billing_printer_id.isnot(None)).first()
         if rs:
             printer = db.get(Printer, rs.billing_printer_id)
 
     if not rs or not printer:
         raise HTTPException(400, detail="No billing printer configured")
-
     if not getattr(printer, "cash_drawer_enabled", False):
-        raise HTTPException(
-            400,
-            detail="Cash drawer not enabled for billing printer",
-        )
-
+        raise HTTPException(400, detail="Cash drawer not enabled for billing printer")
     if not printer.connection_url:
-        raise HTTPException(
-            400,
-            detail="Printer connection not set",
-        )
+        raise HTTPException(400, detail="Printer connection not set")
 
-    await _post_agent(
-        printer.connection_url,
-        {
-            "type": "OPEN_DRAWER",
-            "code": getattr(printer, "cash_drawer_code", None),
-        },
-    )
-
+    await _post_agent(printer.connection_url, {"type": "OPEN_DRAWER", "code": getattr(printer, "cash_drawer_code", None)})
     return {"opened": True}
