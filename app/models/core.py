@@ -464,3 +464,10 @@ class ReportStockSnapshot(Base, IdMixin, TSMMixin):
     __table_args__ = (
         UniqueConstraint("at_date", "ingredient_id", name="uq_report_stock_snapshot_key"),
     )
+
+
+class SyncIdempotency(Base, TSMMixin):
+    __tablename__ = "sync_idempotency"
+    device_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    key: Mapped[str]       = mapped_column(String(120), primary_key=True)
+    stored_count: Mapped[int] = mapped_column(Integer, default=0)
