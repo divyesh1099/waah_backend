@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    String, ForeignKey, Boolean, Numeric, Enum, Text, DateTime, Date, Integer, UniqueConstraint
+    String, ForeignKey, Boolean, Numeric, Enum, Text, DateTime, Date, Integer, UniqueConstraint, Index
 )
 from sqlalchemy.orm import Mapped, mapped_column
 from enum import Enum as PyEnum
@@ -213,9 +213,12 @@ class ItemModifierGroup(Base, TSMMixin):
 class DiningTable(Base, IdMixin, TSMMixin):
     __tablename__ = "dining_table"
     branch_id: Mapped[str] = mapped_column(String(36))
-    code: Mapped[str] = mapped_column(String(30), unique=True)
+    code: Mapped[str] = mapped_column(String(30))  # per-branch unique (not global)
     zone: Mapped[str | None] = mapped_column(String(30))
     seats: Mapped[int | None]
+    __table_args__ = (
+        UniqueConstraint("branch_id", "code", name="uq_table_code_per_branch"),
+    )
 
 class Customer(Base, IdMixin, TSMMixin):
     __tablename__ = "customer"
@@ -229,18 +232,10 @@ class Order(Base, IdMixin, TSMMixin):
     __tablename__ = "order"
     tenant_id: Mapped[str] = mapped_column(String(36))
     branch_id: Mapped[str] = mapped_column(String(36))
-    # CHANGED: was int -> now string/varchar so POS can send "POS1-<timestamp>"
-    order_no: Mapped[str] = mapped_column(String(60))
+    order_no: Mapped[str] = mapped_column(String(60))  # string order no
     channel: Mapped[OrderChannel] = mapped_column(Enum(OrderChannel))
-    # allow null if it's not an online aggregator
-    provider: Mapped[OnlineProvider | None] = mapped_column(
-        Enum(OnlineProvider),
-        nullable=True,
-    )
-    status: Mapped[OrderStatus] = mapped_column(
-        Enum(OrderStatus),
-        default=OrderStatus.OPEN,
-    )
+    provider: Mapped[OnlineProvider | None] = mapped_column(Enum(OnlineProvider), nullable=True)
+    status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), default=OrderStatus.OPEN)
     table_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("dining_table.id"))
     customer_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("customer.id"))
     opened_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("user.id"))
@@ -250,6 +245,9 @@ class Order(Base, IdMixin, TSMMixin):
     note: Mapped[str | None] = mapped_column(Text)
     opened_at: Mapped[datetime | None]
     closed_at: Mapped[datetime | None]
+    __table_args__ = (
+        UniqueConstraint("branch_id", "order_no", name="uq_order_no_per_branch"),
+    )
 
 class OrderItem(Base, IdMixin, TSMMixin):
     __tablename__ = "order_item"
@@ -356,6 +354,10 @@ class SyncEvent(Base, TSMMixin):
     op: Mapped[str] = mapped_column(String(10))  # UPSERT/DELETE
     payload: Mapped[str | None] = mapped_column(Text)
     device_id: Mapped[str | None] = mapped_column(String(36))
+    __table_args__ = (  #  fast pulls
+        Index("ix_sync_event_seq", "seq"),
+    )
+
 
 class SyncCheckpoint(Base, TSMMixin):
     __tablename__ = "sync_checkpoint"
@@ -469,5 +471,5 @@ class ReportStockSnapshot(Base, IdMixin, TSMMixin):
 class SyncIdempotency(Base, TSMMixin):
     __tablename__ = "sync_idempotency"
     device_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    key: Mapped[str]       = mapped_column(String(120), primary_key=True)
+    key:       Mapped[str] = mapped_column(String(120), primary_key=True)
     stored_count: Mapped[int] = mapped_column(Integer, default=0)
