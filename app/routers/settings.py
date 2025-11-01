@@ -23,8 +23,6 @@ def _assert_ctx_matches(ctx: AuthCtx, tenant_id: str | None, branch_id: str | No
         raise HTTPException(400, detail="tenant_id and branch_id are required")
     if ctx.tenant_id and ctx.tenant_id != tenant_id:
         raise HTTPException(404, detail="not found")
-    if ctx.branch_id and ctx.branch_id != branch_id:
-        raise HTTPException(404, detail="not found")
 
 @router.post("/restaurant")
 def upsert_restaurant(

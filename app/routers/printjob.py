@@ -97,7 +97,7 @@ def _gather_line_items(db: Session, order_id: str) -> list[dict]:
         )
     return out
 
-def _build_print_payload(db: Session, order: Order, rs: RestaurantSettings, *, invoice: Invoice | None = None):
+def _build_print_payload(db: Session, order: Order, rs: RestaurantSettings | None, *, invoice: Invoice | None = None):
     lines = _gather_line_items(db, order.id)
     totals = compute_bill(db, order.id)
     paid_rows = db.query(Payment).filter(Payment.order_id == order.id).all()
@@ -112,11 +112,11 @@ def _build_print_payload(db: Session, order: Order, rs: RestaurantSettings, *, i
 
     payload = {
         "restaurant": {
-            "name": rs.name,
-            "address": rs.address,
-            "phone": rs.phone,
-            "gstin": rs.gstin,
-            "fssai": rs.fssai if getattr(rs, "print_fssai_on_invoice", False) else None,
+            "name": getattr(rs, "name", None) if rs else None,
+            "address": getattr(rs, "address", None) if rs else None,
+            "phone": getattr(rs, "phone", None) if rs else None,
+            "gstin": getattr(rs, "gstin", None) if rs else None,
+            "fssai": (rs.fssai if (rs and getattr(rs, "print_fssai_on_invoice", False)) else None),
         },
         "order": {
             "id": order.id,
@@ -135,7 +135,7 @@ def _build_print_payload(db: Session, order: Order, rs: RestaurantSettings, *, i
             "paid": _money(paid_sum),
             "due": due_amt,
         },
-        "footer": getattr(rs, "invoice_footer", None),
+        "footer": getattr(rs, "invoice_footer", None) if rs else None,
     }
     if invoice:
         payload["invoice"] = {
@@ -203,7 +203,7 @@ async def print_bill(
 ):
     order = _ensure_order_access(db, order_id, ctx)
     rs, printer = _get_billing_printer(db, getattr(order, "tenant_id", None), getattr(order, "branch_id", None))
-    if not rs or not printer:
+    if not printer:
         raise HTTPException(400, detail="No billing printer configured")
 
     payload = _build_print_payload(db, order, rs)
