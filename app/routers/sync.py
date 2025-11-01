@@ -11,6 +11,7 @@ from typing import Any
 from app.db import get_db
 from app.deps import require_auth
 from app.models.core import SyncEvent, SyncIdempotency
+from app.routers.sync_apply import apply_ops
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 
@@ -32,11 +33,12 @@ def _dumps(obj: Any) -> str:
     # Compact, unicode-safe, robust JSON
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=_json_default)
 
+
 @router.post("/push")
 def push(
     body: dict,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_auth),  # user id from your auth
+    sub: str = Depends(require_auth),
     idemp_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     ops = body.get("ops", [])
@@ -47,7 +49,7 @@ def push(
     if not device_id:
         raise HTTPException(status_code=400, detail="device_id is required")
 
-    # Idempotency: don’t fail if table isn’t ready yet
+    # --- idempotency probe (if table present) -------------------------------
     idem_supported = True
     if idemp_key:
         try:
@@ -58,7 +60,7 @@ def push(
                   .first()
             )
             if existing:
-                return {"stored": existing.stored_count, "idempotent": True}
+                return {"stored": existing.stored_count, "applied": 0, "idempotent": True}
         except (ProgrammingError, OperationalError):
             db.rollback()
             idem_supported = False
@@ -68,34 +70,25 @@ def push(
     has_actor_column = hasattr(SyncEvent, "actor_user_id")
 
     for op in ops:
-        if not isinstance(op, dict):
-            raise HTTPException(status_code=400, detail="each op must be an object")
-
         try:
             entity = op["entity"]
             entity_id = op["entity_id"]
-            operation = op["op"]  # "UPSERT"/"DELETE"
+            operation = op["op"]
         except KeyError as e:
             raise HTTPException(status_code=400, detail=f"missing field: {e.args[0]}")
 
         payload = op.get("payload")
-        # Normalize payload: always include actor_user_id
         if isinstance(payload, dict):
             if "actor_user_id" not in payload:
                 payload = {**payload, "actor_user_id": sub}
         else:
             payload = {"value": payload, "actor_user_id": sub}
 
-        try:
-            payload_json = _dumps(payload)
-        except TypeError as te:
-            # This should be rare given _json_default, but keep a nice error
-            raise HTTPException(
-                status_code=400,
-                detail=f"payload has unsupported types: {te}"
-            )
+        op["payload"] = payload  # <-- keep dict for applier
 
+        payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         extra = {"actor_user_id": sub} if has_actor_column else {}
+
         events.append(SyncEvent(
             entity=entity,
             entity_id=entity_id,
@@ -107,9 +100,17 @@ def push(
             **extra,
         ))
 
+    # Apply to domain tables BEFORE committing (same txn)
+    applied = 0
+    try:
+        applied = apply_ops(ops, db=db, user_id=sub, device_id=device_id)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"sync apply failed: {e}")
+
     if events:
         db.bulk_save_objects(events)
-        db.flush()  # populate seq
+        db.flush()
 
     stored = len(events)
 
@@ -124,12 +125,10 @@ def push(
             ))
         except (ProgrammingError, OperationalError):
             db.rollback()
-            # proceed without idempotency record
-            db.commit()
-            return {"stored": stored, "idempotent": False}
+            return {"stored": stored, "applied": applied, "idempotent": False}
 
     db.commit()
-    return {"stored": stored, "idempotent": bool(idemp_key and idem_supported)}
+    return {"stored": stored, "applied": applied, "idempotent": bool(idemp_key and idem_supported)}
 
 @router.get("/pull")
 def pull(
