@@ -26,7 +26,7 @@ from app.routers import (
     media,
     inventory,
     shift,
-    print as print_router,         # /print/...   (✅ ensure THIS is imported)
+    printjob as print_router,# /print/...   (✅ ensure THIS is imported)
     online,
 )
 
