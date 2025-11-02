@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 import httpx
 from decimal import Decimal, ROUND_HALF_UP
-
+from app.models.core import PrinterType
 from app.db import get_db
 from app.deps import AuthCtx, require_auth
 from app.models.core import (
@@ -149,45 +149,56 @@ def _build_print_payload(db: Session, order: Order, rs: RestaurantSettings | Non
 
 def _get_billing_printer(db: Session, tenant_id: str | None, branch_id: str | None):
     """
-    Resolve the active BILLING printer for a branch with fallbacks:
+    Resolve the active BILLING/BILL printer for a branch with fallbacks:
       1) RestaurantSettings.billing_printer_id
-      2) Branch default BILLING printer (is_default=True)
-      3) Any BILLING printer for the branch
+      2) Branch default BILL printer (is_default=True)
+      3) Any BILL printer for the branch
     Returns (rs, printer) or (None, None).
     """
+
+    def _has_url(p: Printer | None) -> bool:
+        return bool(p and getattr(p, "connection_url", None) and p.connection_url.strip())
+
+    # Accept both enum and string representations
+    bill_tokens = []
+    # enum tokens (if column type is Enum)
+    if hasattr(PrinterType, "BILLING"):
+        bill_tokens.append(PrinterType.BILLING)
+    if hasattr(PrinterType, "BILL"):
+        bill_tokens.append(PrinterType.BILL)
+    # string tokens (if column type is String)
+    bill_tokens.extend(["BILLING", "BILL"])
+
     if not branch_id:
         return None, None
 
+    # Restaurant settings first
     rs = (
         db.query(RestaurantSettings)
         .filter(RestaurantSettings.branch_id == branch_id)
-        .filter(RestaurantSettings.tenant_id == tenant_id if tenant_id else True)
-        .first()
-    )
+        .filter(RestaurantSettings.tenant_id == tenant_id) if tenant_id
+        else db.query(RestaurantSettings).filter(RestaurantSettings.branch_id == branch_id)
+    ).first()
+
     if rs and rs.billing_printer_id:
         p = db.get(Printer, rs.billing_printer_id)
-        if p and p.connection_url:
+        if _has_url(p):
             return rs, p
 
-    p = (
-        db.query(Printer)
-        .filter(Printer.branch_id == branch_id)
-        .filter(Printer.tenant_id == tenant_id if tenant_id else True)
-        .filter(Printer.type == "BILLING")
-        .filter(Printer.is_default == True)  # noqa: E712
-        .first()
-    )
-    if p and p.connection_url:
+    # Default BILL printer (is_default=True)
+    q = db.query(Printer).filter(Printer.branch_id == branch_id)
+    if tenant_id:
+        q = q.filter(Printer.tenant_id == tenant_id)
+    p = q.filter(Printer.type.in_(bill_tokens)).filter(Printer.is_default == True).first()  # noqa: E712
+    if _has_url(p):
         return rs, p
 
-    p = (
-        db.query(Printer)
-        .filter(Printer.branch_id == branch_id)
-        .filter(Printer.tenant_id == tenant_id if tenant_id else True)
-        .filter(Printer.type == "BILLING")
-        .first()
-    )
-    if p and p.connection_url:
+    # Any BILL printer
+    q = db.query(Printer).filter(Printer.branch_id == branch_id)
+    if tenant_id:
+        q = q.filter(Printer.tenant_id == tenant_id)
+    p = q.filter(Printer.type.in_(bill_tokens)).first()
+    if _has_url(p):
         return rs, p
 
     return None, None
