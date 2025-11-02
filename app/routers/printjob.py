@@ -21,6 +21,7 @@ from app.models.core import (
     Printer,
     DiningTable,
     Branch,
+    PrinterType,
 )
 from app.services.billing import compute_bill
 
@@ -146,58 +147,131 @@ def _build_print_payload(db: Session, order: Order, rs: RestaurantSettings | Non
             "cashier_user_id": getattr(invoice, "cashier_user_id", None),
         }
     return payload
-
-def _get_billing_printer(db: Session, tenant_id: str | None, branch_id: str | None):
+def _billing_type_tokens():
     """
-    Resolve the active BILLING/BILL printer for a branch with fallbacks:
-      1) RestaurantSettings.billing_printer_id
-      2) Branch default BILL printer (is_default=True)
-      3) Any BILL printer for the branch
+    Return acceptable 'billing' printer type tokens.
+    If PrinterType enum exists, return ONLY enum members that correspond to billing.
+    Else, return string values as a fallback.
+    """
+    enum_tokens = []
+    # Prefer enum members that might be used in your model
+    for name in ("BILLING", "BILL", "RECEIPT"):
+        if hasattr(PrinterType, name):
+            enum_tokens.append(getattr(PrinterType, name))
+
+    if enum_tokens:
+        return enum_tokens  # IMPORTANT: no strings mixed with enums
+
+    # Fallback ONLY when the column is a plain string type
+    return ["BILLING", "RECEIPT", "BILL"]
+
+def _has_url(p: Printer | None) -> bool:
+    return bool(p and getattr(p, "connection_url", None) and p.connection_url.strip())
+
+
+def _resolve_billing_printer(
+    db: Session,
+    tenant_id: str | None,
+    branch_id: str | None,
+    preferred_id: str | None = None,
+):
+    """
+    Resolve a BILLING printer with fallbacks:
+      • preferred_id (if valid)      -> returns immediately
+      • RestaurantSettings.billing_printer_id
+      • Branch default BILLING printer (is_default=True)
+      • Any BILLING printer for the branch
     Returns (rs, printer) or (None, None).
     """
-
-    def _has_url(p: Printer | None) -> bool:
-        return bool(p and getattr(p, "connection_url", None) and p.connection_url.strip())
-
-    # Accept both enum and string representations
-    bill_tokens = []
-    # enum tokens (if column type is Enum)
-    if hasattr(PrinterType, "BILLING"):
-        bill_tokens.append(PrinterType.BILLING)
-    if hasattr(PrinterType, "BILL"):
-        bill_tokens.append(PrinterType.BILL)
-    # string tokens (if column type is String)
-    bill_tokens.extend(["BILLING", "BILL"])
-
     if not branch_id:
         return None, None
 
-    # Restaurant settings first
-    rs = (
-        db.query(RestaurantSettings)
-        .filter(RestaurantSettings.branch_id == branch_id)
-        .filter(RestaurantSettings.tenant_id == tenant_id) if tenant_id
-        else db.query(RestaurantSettings).filter(RestaurantSettings.branch_id == branch_id)
-    ).first()
+    # 0) Preferred override (from query) — must belong to same tenant/branch and be BILLING
+    if preferred_id:
+        p = db.get(Printer, preferred_id)
+        if (
+            p
+            and (not tenant_id or p.tenant_id == tenant_id)
+            and (not branch_id or p.branch_id == branch_id)
+            and p.type == PrinterType.BILLING
+            and _has_url(p)
+        ):
+            rs_q = db.query(RestaurantSettings).filter(RestaurantSettings.branch_id == branch_id)
+            if tenant_id:
+                rs_q = rs_q.filter(RestaurantSettings.tenant_id == tenant_id)
+            rs = rs_q.first()
+            return rs, p
+
+    # 1) By Restaurant Settings
+    rs_q = db.query(RestaurantSettings).filter(RestaurantSettings.branch_id == branch_id)
+    if tenant_id:
+        rs_q = rs_q.filter(RestaurantSettings.tenant_id == tenant_id)
+    rs = rs_q.first()
+
+    if rs and rs.billing_printer_id:
+        p = db.get(Printer, rs.billing_printer_id)
+        if _has_url(p) and p.type == PrinterType.BILLING:
+            return rs, p
+
+    # 2) Default BILLING printer
+    qp = db.query(Printer).filter(Printer.branch_id == branch_id)
+    if tenant_id:
+        qp = qp.filter(Printer.tenant_id == tenant_id)
+    p = (
+        qp.filter(Printer.type.in_([PrinterType.BILLING]))
+          .filter(Printer.is_default == True)  # noqa: E712
+          .first()
+    )
+    if _has_url(p):
+        return rs, p
+
+    # 3) Any BILLING printer
+    qp = db.query(Printer).filter(Printer.branch_id == branch_id)
+    if tenant_id:
+        qp = qp.filter(Printer.tenant_id == tenant_id)
+    p = qp.filter(Printer.type.in_([PrinterType.BILLING])).first()
+    if _has_url(p):
+        return rs, p
+
+    return None, None
+
+def _get_billing_printer(db: Session, tenant_id: str | None, branch_id: str | None):
+    """
+    Resolve the active BILLING printer for a branch with fallbacks:
+      1) RestaurantSettings.billing_printer_id
+      2) Branch default billing printer (is_default=True)
+      3) Any billing printer for the branch
+    Returns (rs, printer) or (None, None).
+    """
+    if not branch_id:
+        return None, None
+
+    tokens = _billing_type_tokens()
+
+    # 1) By Restaurant Settings
+    qrs = db.query(RestaurantSettings).filter(RestaurantSettings.branch_id == branch_id)
+    if tenant_id:
+        qrs = qrs.filter(RestaurantSettings.tenant_id == tenant_id)
+    rs = qrs.first()
 
     if rs and rs.billing_printer_id:
         p = db.get(Printer, rs.billing_printer_id)
         if _has_url(p):
             return rs, p
 
-    # Default BILL printer (is_default=True)
-    q = db.query(Printer).filter(Printer.branch_id == branch_id)
+    # 2) Default billing printer
+    qp = db.query(Printer).filter(Printer.branch_id == branch_id)
     if tenant_id:
-        q = q.filter(Printer.tenant_id == tenant_id)
-    p = q.filter(Printer.type.in_(bill_tokens)).filter(Printer.is_default == True).first()  # noqa: E712
+        qp = qp.filter(Printer.tenant_id == tenant_id)
+    p = qp.filter(Printer.type.in_(tokens)).filter(Printer.is_default == True).first()  # noqa: E712
     if _has_url(p):
         return rs, p
 
-    # Any BILL printer
-    q = db.query(Printer).filter(Printer.branch_id == branch_id)
+    # 3) Any billing printer
+    qp = db.query(Printer).filter(Printer.branch_id == branch_id)
     if tenant_id:
-        q = q.filter(Printer.tenant_id == tenant_id)
-    p = q.filter(Printer.type.in_(bill_tokens)).first()
+        qp = qp.filter(Printer.tenant_id == tenant_id)
+    p = qp.filter(Printer.type.in_(tokens)).first()
     if _has_url(p):
         return rs, p
 
@@ -209,11 +283,20 @@ def _get_billing_printer(db: Session, tenant_id: str | None, branch_id: str | No
 async def print_bill(
     order_id: str,
     reason: str | None = None,
+    printer_id: str | None = None,   # <-- NEW: optional override
+    tenant_id: str | None = None,    # (ignored for security; order's tenant/branch are the truth)
+    branch_id: str | None = None,    # (ignored; we use order.tenant_id/branch_id)
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
     order = _ensure_order_access(db, order_id, ctx)
-    rs, printer = _get_billing_printer(db, getattr(order, "tenant_id", None), getattr(order, "branch_id", None))
+
+    rs, printer = _resolve_billing_printer(
+        db,
+        getattr(order, "tenant_id", None),
+        getattr(order, "branch_id", None),
+        preferred_id=printer_id,
+    )
     if not printer:
         raise HTTPException(400, detail="No billing printer configured")
 
@@ -224,10 +307,14 @@ async def print_bill(
     db.commit()
     return {"printed": True}
 
+
 @router.post("/invoice/{invoice_id}")
 async def print_invoice(
     invoice_id: str,
     reason: str | None = None,
+   printer_id: str | None = None,  # <-- NEW: optional override
+   tenant_id: str | None = None,   # (ignored; order’s tenant/branch are authoritative)
+   branch_id: str | None = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
@@ -236,7 +323,12 @@ async def print_invoice(
         raise HTTPException(404, detail="invoice not found")
     order = _ensure_order_access(db, inv.order_id, ctx)
 
-    rs, printer = _get_billing_printer(db, getattr(order, "tenant_id", None), getattr(order, "branch_id", None))
+    rs, printer = _resolve_billing_printer(
+        db,
+        getattr(order, "tenant_id", None),
+        getattr(order, "branch_id", None),
+        preferred_id=printer_id,
+    )
     if not rs or not printer:
         raise HTTPException(400, detail="No billing printer configured")
 
