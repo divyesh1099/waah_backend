@@ -94,14 +94,15 @@ def _gather_station_lines(
     ctx: Optional[AuthCtx] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Collect all order lines that belong to `station_id` (kitchen station).
-    We ALSO return each line's DB id so we can snapshot it into KitchenTicketItem.
+    Collect all order lines that belong to `station_id` (kitchen station),
+    including variant label and modifiers as strings, ready for API payloads.
     Returned dict per line:
         {
             "order_item_id": "<uuid of order_item row>",
             "name": "Paneer Chilli",
             "qty": 2.0,
-            "mods": ["Extra Spicy", "No Onion x2"]
+            "variantLabel": "Full",
+            "mods": ["Extra Spicy", "No Onion x2"],
         }
     """
 
@@ -116,8 +117,7 @@ def _gather_station_lines(
         .filter(OrderItem.order_id == order_id)
     )
 
-    # Enforce tenant/branch via MenuCategory so one branch
-    # can't see/order another branch's prep list
+    # Enforce tenant/branch via MenuCategory so one branch can't leak into another
     if ctx is not None:
         q = q.join(MenuCategory, MenuCategory.id == MenuItem.category_id)
         q = q.filter(MenuCategory.tenant_id == ctx.tenant_id)
@@ -132,6 +132,16 @@ def _gather_station_lines(
 
     out_lines: List[Dict[str, Any]] = []
     for line, item_name, _station_id in rows:
+        # variant label (optional)
+        vlabel: Optional[str] = None
+        try:
+            if getattr(line, "variant_id", None):
+                v = db.get(ItemVariant, line.variant_id)
+                if v and getattr(v, "label", None):
+                    vlabel = v.label
+        except Exception:
+            pass
+
         # modifiers for this specific order_item line
         mods_q = (
             db.query(
@@ -153,15 +163,15 @@ def _gather_station_lines(
 
         out_lines.append(
             {
-                "order_item_id": line.id,           # IMPORTANT for KitchenTicketItem FK
+                "order_item_id": line.id,
                 "name": item_name,
-                "qty": float(line.qty or 0),
+                "qty": float(getattr(line, "qty", 0) or 0),
+                "variantLabel": vlabel,
                 "mods": mods_list,
             }
         )
 
     return out_lines
-
 
 def _build_kot_payload(
     db: Session,
@@ -339,7 +349,7 @@ def list_tickets(
 ):
     """
     List kitchen tickets for this tenant/branch, optionally filtered by status.
-    Used by the kitchen screen tabs: NEW / IN_PROGRESS / READY.
+    Response is shaped for the Flutter KOT v3.2 page (camelCase + lines + timestamps).
     """
 
     q = db.query(KitchenTicket).join(Order, Order.id == KitchenTicket.order_id)
@@ -350,7 +360,7 @@ def list_tickets(
     if ctx.branch_id and hasattr(Order, "branch_id"):
         q = q.filter(Order.branch_id == ctx.branch_id)
 
-    # Optional status filter
+    # Optional status filter (expects values like NEW / IN_PROGRESS / READY)
     if status:
         try:
             st_enum = KOTStatus[status]
@@ -361,30 +371,77 @@ def list_tickets(
     q = q.order_by(KitchenTicket.ticket_no.desc())
     tickets = q.all()
 
-    out = []
+    out: List[Dict[str, Any]] = []
     for t in tickets:
-        payload, _printer_url, station_name, table_code, waiter_name, order = _build_kot_payload(
-            db, t, ctx
-        )
+        # Pull order & station context
+        order = db.get(Order, t.order_id)
+        table_code: Optional[str] = None
+        waiter_name: Optional[str] = None
+        station_name: Optional[str] = None
+
+        if order and getattr(order, "table_id", None):
+            tbl = db.get(DiningTable, order.table_id)
+            if tbl:
+                table_code = tbl.code
+
+        if order and getattr(order, "opened_by_user_id", None):
+            u = db.get(User, order.opened_by_user_id)
+            if u:
+                waiter_name = u.name
+
+        if getattr(t, "target_station", None):
+            st = db.get(KitchenStation, t.target_station)
+            if st:
+                station_name = st.name
+
+        # Lines for this station (API-friendly): include variantLabel + modifiers
+        raw_lines = _gather_station_lines(db, t.order_id, t.target_station, ctx)
+        line_payloads = [
+            {
+                "name": ln["name"],
+                "qty": ln["qty"],
+                "variantLabel": ln.get("variantLabel"),
+                "modifiers": ln.get("mods", []),  # frontend accepts list[str]
+            }
+            for ln in raw_lines
+        ]
+
+        # createdAt: prefer order.opened_at, else ticket.printed_at, else ticket.created_at (from TSMMixin)
+        created_dt = None
+        try:
+            created_dt = getattr(order, "opened_at", None) or getattr(t, "printed_at", None) or getattr(t, "created_at", None)
+        except Exception:
+            pass
+        created_iso = created_dt.isoformat() if created_dt else None
+
         out.append(
             {
+                # identifiers
                 "id": t.id,
-                "order_id": t.order_id,
-                "ticket_no": t.ticket_no,
-                "target_station": t.target_station,
-                "station_name": station_name,
+                "orderId": t.order_id,
+                "ticketNo": t.ticket_no,
+
+                # status & timing
                 "status": t.status.name if t.status else None,
-                "printed_at": t.printed_at.isoformat() if t.printed_at else None,
-                "reprint_count": t.reprint_count,
-                "table_code": table_code,
-                "waiter_name": waiter_name,
-                "order_no": order.order_no if order else None,
-                "order_note": order.note if order else None,
+                "createdAt": created_iso,
+
+                # station / table / waiter
+                "stationName": station_name,
+                "tableCode": table_code,
+                "waiterName": waiter_name,
+
+                # order decorations
+                "orderNo": getattr(order, "order_no", None) if order else None,
+                "orderNote": getattr(order, "note", None) if order else None,
+                "channel": getattr(getattr(order, "channel", None), "name", None) if order else None,
+                "provider": getattr(getattr(order, "provider", None), "name", None) if order else None,
+
+                # lines (for card + details sheet)
+                "lines": line_payloads,
             }
         )
 
     return out
-
 
 @router.patch("/{ticket_id}")
 def update_ticket_status(
