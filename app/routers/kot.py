@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 import httpx
@@ -8,6 +9,7 @@ from app.db import get_db
 from app.deps import AuthCtx, require_auth, require_perm
 from app.models.core import (
     AuditLog,
+    ItemVariant,
     KitchenTicket,
     KitchenTicketItem,
     KitchenStation,
@@ -559,3 +561,93 @@ def cancel_ticket(
     db.commit()
 
     return {"ok": True, "status": "CANCELLED"}
+
+
+def _next_ticket_no_for_branch(db: Session, branch_id: str) -> int:
+    """
+    Branch-scoped next ticket number WITHOUT storing branch_id on KitchenTicket.
+    We join via Order -> KitchenTicket to scope by branch.
+    """
+    max_no = (
+        db.query(func.max(KitchenTicket.ticket_no))
+          .select_from(KitchenTicket)
+          .join(Order, Order.id == KitchenTicket.order_id)
+          .filter(Order.branch_id == branch_id)
+          .scalar()
+    )
+    return (max_no or 0) + 1
+
+@router.post("/tickets")
+async def create_ticket(
+    order_id: str,
+    ticket_no: int = 0,                 # allow 0/missing → server will generate
+    target_station: Optional[str] = None,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Create a kitchen ticket for a station (e.g. 'Indian', 'Chinese').
+    1) Insert KitchenTicket (server generates ticket_no if not supplied)
+    2) Snapshot lines into KitchenTicketItem (FK -> order_item_id, note=mods)
+    3) Try print (fire-and-forget)
+    4) Audit log
+    """
+
+    # --- access checks ---
+    order = _ensure_order_access(db, order_id, ctx)
+    _ensure_station_access(db, target_station, ctx)
+
+    now = datetime.now(timezone.utc)
+
+    # --- server-side ticket numbering if needed ---
+    if not ticket_no or ticket_no <= 0:
+        # prefer the order's branch if ctx.branch_id is absent
+        branch_id = getattr(order, "branch_id", None) or ctx.branch_id
+        if not branch_id:
+            raise HTTPException(status_code=400, detail="branch unknown for numbering")
+        ticket_no = _next_ticket_no_for_branch(db, branch_id)
+
+    # --- create ticket row ---
+    t = KitchenTicket(
+        order_id=order_id,
+        ticket_no=ticket_no,
+        target_station=target_station,
+        status=KOTStatus.NEW,
+        printed_at=now,
+    )
+    db.add(t)
+    db.flush()  # get t.id early
+
+    # --- snapshot lines (station-filtered) ---
+    station_lines = _gather_station_lines(db, order_id, target_station, ctx)
+    for ln in station_lines:
+        note_text = ", ".join(ln["mods"]) if ln["mods"] else None
+        db.add(KitchenTicketItem(
+            ticket_id=t.id,
+            order_item_id=ln["order_item_id"],   # NOT NULL ok
+            qty=ln["qty"],
+            note=note_text,
+        ))
+
+    db.flush()
+
+    # --- print (best-effort) ---
+    payload, printer_url, *_ = _build_kot_payload(db, t, ctx)
+    if printer_url:
+        await _post_agent(printer_url, payload)
+
+    # --- audit ---
+    db.add(AuditLog(
+        actor_user_id=ctx.user_id,
+        entity="KitchenTicket",
+        entity_id=t.id,
+        action="PRINT_KOT",
+        reason=None,
+        before=None,
+        after=None,
+    ))
+
+    db.commit()
+    db.refresh(t)
+
+    return {"ticket_id": t.id, "ticket_no": t.ticket_no, "status": t.status.name}

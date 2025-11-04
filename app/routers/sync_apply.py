@@ -7,7 +7,7 @@ from typing import Any, Iterable
 from sqlalchemy.orm import Session
 
 from app.models.core import (
-    Order, OrderItem, OrderChannel, OrderStatus
+    KOTStatus, KitchenTicket, Order, OrderItem, OrderChannel, OrderStatus
 )
 
 def _parse_dt(val: Any) -> datetime | None:
@@ -37,42 +37,33 @@ def _enum(enum_cls, value, default):
         except Exception:
             return default
 
+
 def apply_ops(ops: Iterable[dict], *, db: Session, user_id: str, device_id: str | None) -> int:
-    """
-    Apply a subset of sync ops into domain tables.
-    Currently supports:
-      - entity="Order", op="UPSERT"
-        Required in payload: tenant_id, branch_id, order_no
-        Optional: channel, status, pax, note, opened_at, items: [...]
-    """
     applied = 0
-
     for op in ops:
-        entity = op.get("entity")
-        if entity != "Order":
-            # (future) handle other entities like OrderItem/Payment/KOT, etc.
+        entity = (op.get("entity") or "").lower()
+        oper   = (op.get("op") or "").upper()
+        if oper == "OPEN":
+            oper = "UPSERT"
+        if entity != "order":
+            continue
+        if oper not in ("UPSERT", "CREATE", "UPDATE"):
             continue
 
-        if op.get("op") not in ("UPSERT", "CREATE", "UPDATE"):
-            continue
-
-        payload = op.get("payload") or {}
-        tenant_id   = payload.get("tenant_id")
-        branch_id   = payload.get("branch_id")
-        order_no    = payload.get("order_no")
-
+        payload   = op.get("payload") or {}
+        tenant_id = payload.get("tenant_id")
+        branch_id = payload.get("branch_id")
+        order_no  = payload.get("order_no")
         if not (tenant_id and branch_id and order_no):
-            # insufficient info — skip rather than breaking the whole batch
-            # (client must send these; FE has activeTenantId/activeBranchId)
             continue
 
-        channel     = _enum(OrderChannel, payload.get("channel"), OrderChannel.TAKEAWAY)
-        status      = _enum(OrderStatus,  payload.get("status"),  OrderStatus.OPEN)
-        opened_at   = _parse_dt(payload.get("opened_at")) or datetime.now(timezone.utc)
-        pax         = payload.get("pax")
-        note        = payload.get("note")
+        channel   = _enum(OrderChannel, payload.get("channel"), OrderChannel.TAKEAWAY)
+        status    = _enum(OrderStatus,  payload.get("status"),  OrderStatus.OPEN)
+        opened_at = _parse_dt(payload.get("opened_at")) or datetime.now(timezone.utc)
+        pax       = payload.get("pax")
+        note      = payload.get("note")
 
-        # Find existing order by (branch_id, order_no) for idempotency
+        # idempotent upsert by (branch_id, order_no)
         row = (db.query(Order)
                  .filter(Order.branch_id == branch_id, Order.order_no == order_no)
                  .first())
@@ -86,9 +77,7 @@ def apply_ops(ops: Iterable[dict], *, db: Session, user_id: str, device_id: str 
             if not row.opened_at:
                 row.opened_at = opened_at
         else:
-            new_id = (payload.get("id")
-                      or op.get("entity_id")
-                      or str(uuid4()))
+            new_id = (payload.get("id") or op.get("entity_id") or str(uuid4()))
             row = Order(
                 id=new_id,
                 tenant_id=tenant_id,
@@ -103,12 +92,11 @@ def apply_ops(ops: Iterable[dict], *, db: Session, user_id: str, device_id: str 
                 note=note,
             )
             db.add(row)
-            db.flush()  # get row.id
+            db.flush()
 
-        # Optional: upsert/replace basic line items if payload has them
+        # replace items if provided (keeps things deterministic)
         items = payload.get("items")
         if isinstance(items, list):
-            # simplest, deterministic approach: replace all existing lines
             db.query(OrderItem).filter(OrderItem.order_id == row.id).delete()
             for it in items:
                 if not it:
@@ -130,3 +118,11 @@ def apply_ops(ops: Iterable[dict], *, db: Session, user_id: str, device_id: str 
         applied += 1
 
     return applied
+
+def _next_kot_number(db: Session, branch_id: str) -> int:
+    # Per-branch monotonically increasing; simple & safe
+    last = (db.query(KitchenTicket)
+              .filter(KitchenTicket.branch_id == branch_id)
+              .order_by(KitchenTicket.number.desc())
+              .first())
+    return (last.number + 1) if last and last.number else 1
