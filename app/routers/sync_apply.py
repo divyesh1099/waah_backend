@@ -159,13 +159,13 @@ def _apply_kot(
     order_id = order_map.get(order_no_ref)  # Check the map of orders created in this *same* transaction
     if not order_id:
         # Not in this transaction, maybe it's an "add-on" KOT for an existing order
-        order = db.query(Order.id).filter(
+        order_row = db.query(Order.id).filter(
             Order.order_no == order_no_ref, 
             Order.branch_id == payload.get("branch_id")
         ).first()
         
-        if order:
-            order_id = order.id
+        if order_row:
+            order_id = order_row.id
         else:
             return 0  # Can't find parent order, skip KOT
 
@@ -217,17 +217,58 @@ def _apply_kot(
     return 1  # Applied 1 KOT op
 
 
+# --- MAIN SYNC FUNCTION ---
+
 def apply_ops(ops: Iterable[dict], *, db: Session, user_id: str, device_id: str | None) -> int:
-    applied = 0
-    for op in ops:
-        entity = (op.get("entity") or "").lower()
-        oper   = (op.get("op") or "").upper()
-        if oper == "OPEN":
-            oper = "UPSERT"
-        if entity != "order":
+    applied_count = 0
+    
+    # We must process Orders first, then KOTs, so we can link them.
+    # We'll store mappings of (client_id -> db_id) for this transaction.
+    
+    order_id_map: dict[str, str] = {}  # "POS-123" (order_no) -> "uuid-db-order-id"
+    order_item_map: dict[str, str] = {} # "li-123" (client_id) -> "uuid-db-item-id"
+
+    # 1st Pass: Process Orders
+    order_ops = [op for op in ops if (op.get("entity") or "").lower() == "order"]
+    for op in order_ops:
+        oper = (op.get("op") or "").upper()
+        if oper not in ("UPSERT", "CREATE", "UPDATE", "OPEN"):
             continue
-        if oper not in ("UPSERT", "CREATE", "UPDATE"):
+        
+        try:
+            order_id, new_item_map = _apply_order(op, db=db, user_id=user_id, device_id=device_id)
+            if order_id:
+                applied_count += 1
+                order_no = op.get("payload", {}).get("order_no")
+                if order_no:
+                    order_id_map[order_no] = order_id  # Store the mapping
+                if new_item_map:
+                    order_item_map.update(new_item_map)  # Add all new item mappings
+        except Exception as e:
+            print(f"Failed to apply order op: {e}") # Log error
+            pass  # Continue to next op
+
+    # 2nd Pass: Process KitchenTickets
+    kot_ops = [op for op in ops if (op.get("entity") or "").lower() == "kitchenticket"]
+    for op in kot_ops:
+        oper = (op.get("op") or "").upper()
+        if oper not in ("UPSERT", "CREATE", "UPDATE", "OPEN"):
             continue
+        
+        try:
+            applied = _apply_kot(
+                op,
+                db=db,
+                user_id=user_id,
+                device_id=device_id,
+                order_map=order_id_map,
+                item_map=order_item_map,
+            )
+            if applied > 0:
+                applied_count += 1
+        except Exception as e:
+            print(f"Failed to apply KOT op: {e}") # Log error
+            pass
 
         payload   = op.get("payload") or {}
         tenant_id = payload.get("tenant_id")
