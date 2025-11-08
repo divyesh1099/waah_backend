@@ -2,13 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from typing import List
+from typing import List, Optional
 from datetime import datetime, timezone, date
 from decimal import Decimal, ROUND_HALF_UP
 
 from app.db import get_db
 from app.deps import AuthCtx, require_auth
-from app.schemas.orders import OrderIn, OrderOut, OrderItemIn, PaymentIn
+from app.schemas.orders import OrderIn, OrderOut, OrderItemIn, PaymentIn, OrderStatusUpdate
 from app.models.core import (
     AuditLog, Invoice, Order, OrderStatus, OrderItem, Payment, MenuItem, ItemVariant,
     KitchenTicket, KitchenTicketItem, RecipeBOM, StockMove, StockMoveType,
@@ -16,7 +16,7 @@ from app.models.core import (
 )
 from app.services.billing import compute_bill
 
-router = APIRouter(prefix="/orders", tags=["orders"]) 
+router = APIRouter(prefix="/orders", tags=["orders"])
 
 
 def _money(x: float | Decimal) -> float:
@@ -74,6 +74,8 @@ def _ensure_order_access(db: Session, order_id: str, ctx: AuthCtx) -> Order:
 @router.get("/")
 def list_orders(
     status: str | None = None,
+    start_dt: Optional[datetime] = None,
+    end_dt: Optional[datetime] = None,
     page: int = 1,
     size: int = 20,
     db: Session = Depends(get_db),
@@ -84,6 +86,8 @@ def list_orders(
 
     Query params:
       - status: "OPEN", "CLOSED", etc. (optional)
+      - start_dt: ISO 8601 timestamp (optional)
+      - end_dt: ISO 8601 timestamp (optional)
       - page:   1-based page index
       - size:   page size
 
@@ -106,6 +110,12 @@ def list_orders(
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid status")
         q = q.filter(Order.status == wanted)
+
+    # NEW: optional filter by datetime range (on opened_at)
+    if start_dt:
+        q = q.filter(Order.opened_at >= start_dt)
+    if end_dt:
+        q = q.filter(Order.opened_at <= end_dt)
 
     # simple pagination math
     if page < 1:
@@ -179,6 +189,65 @@ def open_order(body: OrderIn, db: Session = Depends(get_db), ctx: AuthCtx = Depe
     db.commit()
     db.refresh(o)
     return OrderOut(id=o.id, status=o.status.value, **body.model_dump())
+
+
+@router.patch("/{order_id}/status")
+def update_order_status(
+    order_id: str,
+    body: OrderStatusUpdate,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Explicitly update the status of an Order.
+    This can be used to move an order to VOID, or manually to KITCHEN, READY, etc.
+    """
+    o = _ensure_order_access(db, order_id, ctx)
+    
+    try:
+        new_status_enum = OrderStatus(body.status)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid status value")
+
+    old_status_str = o.status.value
+    
+    # Don't allow changing a finalized order (unless voiding)
+    if o.status in (OrderStatus.CLOSED, OrderStatus.VOID) and new_status_enum != OrderStatus.VOID:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cannot change status of a {old_status_str} order"
+        )
+
+    o.status = new_status_enum
+    
+    # If moving to a terminal state, set closed_at/by
+    if new_status_enum in (OrderStatus.CLOSED, OrderStatus.VOID):
+        if not o.closed_at:
+            o.closed_at = datetime.now(timezone.utc)
+        if hasattr(o, "closed_by_user_id"):
+            o.closed_by_user_id = ctx.user_id
+    
+    # Log the explicit status change
+    db.add(
+        AuditLog(
+            actor_user_id=ctx.user_id,
+            entity="Order",
+            entity_id=order_id,
+            action="STATUS_CHANGE",
+            reason=body.reason,
+            before=old_status_str,
+            after=new_status_enum.value,
+        )
+    )
+    
+    db.commit()
+    db.refresh(o)
+    
+    return {
+        "id": o.id,
+        "status": o.status.value,
+        "closed_at": o.closed_at
+    }
 
 
 @router.post("/{order_id}/items")
@@ -377,7 +446,7 @@ def remove_item(
         db.add(
             StockMove(
                 ingredient_id=r.ingredient_id,
-                type=StockMoveType.ADJUST,   # add back
+                type=StockMoveType.ADJUST,  # add back
                 qty_change=(rq * lq),
                 reason=f"Cancel order item {order_item_id}",
                 ref_order_id=order_id,

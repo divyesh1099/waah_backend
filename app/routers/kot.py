@@ -265,11 +265,20 @@ def _build_kot_payload(
 @router.get("/tickets")
 def list_tickets(
     status: Optional[str] = None,
+    start_dt: Optional[datetime] = None,
+    end_dt: Optional[datetime] = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
     """
-    List kitchen tickets for this tenant/branch, optionally filtered by status.
+    List kitchen tickets for this tenant/branch, optionally filtered by status
+    and/or datetime range (based on when the order was opened).
+    
+    Query params:
+      - status: "NEW", "IN_PROGRESS", "READY" (optional)
+      - start_dt: ISO 8601 timestamp (optional)
+      - end_dt: ISO 8601 timestamp (optional)
+
     Response is shaped for the Flutter KOT v3.2 page (camelCase + lines + timestamps).
     """
 
@@ -288,6 +297,12 @@ def list_tickets(
         except KeyError:
             raise HTTPException(status_code=400, detail="bad status")
         q = q.filter(KitchenTicket.status == st_enum)
+
+    # NEW: optional filter by datetime range (on opened_at)
+    if start_dt:
+        q = q.filter(Order.opened_at >= start_dt)
+    if end_dt:
+        q = q.filter(Order.opened_at <= end_dt)
 
     q = q.order_by(KitchenTicket.ticket_no.desc())
     tickets = q.all()
@@ -378,9 +393,12 @@ def update_ticket_status(
     t = _ensure_ticket_access(db, ticket_id, ctx)
 
     new_status = body.get("status")
+    old_status_str = t.status.value # For audit log
+    
     if new_status:
         try:
-            t.status = KOTStatus[new_status]
+            new_status_enum = KOTStatus[new_status]
+            t.status = new_status_enum
         except KeyError:
             raise HTTPException(status_code=400, detail="bad status")
 
@@ -391,7 +409,7 @@ def update_ticket_status(
             entity_id=ticket_id,
             action="STATUS_CHANGE",
             reason=None,
-            before=None,
+            before=old_status_str,
             after=new_status,
         )
     )
@@ -460,6 +478,8 @@ def cancel_ticket(
     """
 
     t = _ensure_ticket_access(db, ticket_id, ctx)
+    
+    old_status_str = t.status.value # For audit log
 
     t.status = KOTStatus.CANCELLED
     if hasattr(t, "cancel_reason"):
@@ -472,8 +492,8 @@ def cancel_ticket(
             entity_id=ticket_id,
             action="CANCEL",
             reason=reason,
-            before=None,
-            after=None,
+            before=old_status_str,
+            after=KOTStatus.CANCELLED.value,
         )
     )
 
@@ -499,7 +519,7 @@ def _next_ticket_no_for_branch(db: Session, branch_id: str) -> int:
 @router.post("/tickets")
 async def create_ticket(
     order_id: str,
-    ticket_no: int = 0,                 # allow 0/missing → server will generate
+    ticket_no: int = 0,                # allow 0/missing → server will generate
     target_station: Optional[str] = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),

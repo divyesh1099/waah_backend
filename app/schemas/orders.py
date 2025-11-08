@@ -4,6 +4,7 @@ from typing import Optional, Literal
 OrderChannelLiteral = Literal["DINE_IN", "TAKEAWAY", "DELIVERY", "ONLINE"]
 PayModeLiteral = Literal["CASH","CARD","UPI","WALLET","COUPON"]
 OnlineProviderLiteral = Literal["ZOMATO","SWIGGY","CUSTOM"]
+OrderStatusLiteral = Literal["OPEN", "KITCHEN", "READY", "SERVED", "CLOSED", "VOID"]
 
 class OrderIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="ignore")
@@ -48,3 +49,8 @@ class InvoiceOut(BaseModel):
     model_config = ConfigDict(extra="ignore")
     invoice_id: str
     invoice_no: str
+
+class OrderStatusUpdate(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    status: OrderStatusLiteral
+    reason: Optional[str] = None # For auditing, e.g., if moving to VOID
