@@ -57,6 +57,7 @@ def _apply_order(
     opened_at = _parse_dt(payload.get("opened_at")) or datetime.now(timezone.utc)
     pax = payload.get("pax")
     note = payload.get("note")
+    table_id = payload.get("table_id") # Get table_id from payload
 
     row = (
         db.query(Order)
@@ -71,6 +72,7 @@ def _apply_order(
         row.channel = channel
         row.pax = pax if pax is not None else row.pax
         row.note = note if note is not None else row.note
+        row.table_id = table_id if table_id is not None else row.table_id
         row.source_device_id = device_id or row.source_device_id
         if not row.opened_at:
             row.opened_at = opened_at
@@ -88,12 +90,14 @@ def _apply_order(
             source_device_id=device_id,
             pax=pax,
             note=note,
+            table_id=table_id, # Set table_id on creation
         )
         db.add(row)
         db.flush() # We need row.id before creating items
 
     items = payload.get("items")
     if isinstance(items, list):
+        # Delete existing items only if new items are provided
         db.query(OrderItem).filter(OrderItem.order_id == row.id).delete()
         for it in items:
             if not isinstance(it, dict):
@@ -202,8 +206,8 @@ def _apply_kot(
 
             if not order_item_id:
                 # This item wasn't in the same batch or couldn't be found.
-                # In a real system, you might try to find it by other means,
-                # but for now, we'll skip it.
+                # Try to find it in the DB by client_id (if we stored it)
+                # For this simple implementation, we'll just skip
                 continue
 
             db.add(KitchenTicketItem(
