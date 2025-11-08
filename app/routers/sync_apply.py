@@ -1,13 +1,14 @@
-# app/services/sync_apply.py
 from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.models.core import (
-    KOTStatus, KitchenTicket, Order, OrderItem, OrderChannel, OrderStatus
+    KOTStatus, KitchenTicket, KitchenTicketItem,
+    Order, OrderItem, OrderChannel, OrderStatus
 )
 
 def _parse_dt(val: Any) -> datetime | None:
@@ -36,6 +37,184 @@ def _enum(enum_cls, value, default):
             return enum_cls(str(value).upper())
         except Exception:
             return default
+
+def _apply_order(
+    op: dict, *, db: Session, user_id: str, device_id: str | None
+) -> tuple[str | None, dict[str, str]]:
+    """
+    Applies a single Order operation.
+    Returns the (order_id, client_to_db_item_id_map)
+    """
+    payload = op.get("payload") or {}
+    tenant_id = payload.get("tenant_id")
+    branch_id = payload.get("branch_id")
+    order_no = payload.get("order_no")
+    if not (tenant_id and branch_id and order_no):
+        return None, {}  # Skip this op
+
+    channel = _enum(OrderChannel, payload.get("channel"), OrderChannel.TAKEAWAY)
+    status = _enum(OrderStatus, payload.get("status"), OrderStatus.OPEN)
+    opened_at = _parse_dt(payload.get("opened_at")) or datetime.now(timezone.utc)
+    pax = payload.get("pax")
+    note = payload.get("note")
+
+    row = (
+        db.query(Order)
+        .filter(Order.branch_id == branch_id, Order.order_no == order_no)
+        .first()
+    )
+
+    order_items_by_client_id = {}  # Store client_id -> db_id mapping
+
+    if row:
+        row.status = status
+        row.channel = channel
+        row.pax = pax if pax is not None else row.pax
+        row.note = note if note is not None else row.note
+        row.source_device_id = device_id or row.source_device_id
+        if not row.opened_at:
+            row.opened_at = opened_at
+    else:
+        new_id = (payload.get("id") or op.get("entity_id") or str(uuid4()))
+        row = Order(
+            id=new_id,
+            tenant_id=tenant_id,
+            branch_id=branch_id,
+            order_no=order_no,
+            channel=channel,
+            status=status,
+            opened_by_user_id=user_id,
+            opened_at=opened_at,
+            source_device_id=device_id,
+            pax=pax,
+            note=note,
+        )
+        db.add(row)
+        db.flush() # We need row.id before creating items
+
+    items = payload.get("items")
+    if isinstance(items, list):
+        db.query(OrderItem).filter(OrderItem.order_id == row.id).delete()
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            
+            client_line_id = it.get("client_id")  # Get the client_id
+            
+            oi = OrderItem(
+                id=str(uuid4()),
+                order_id=row.id,
+                item_id=it.get("item_id"),
+                variant_id=it.get("variant_id"),
+                parent_line_id=it.get("parent_line_id"),
+                qty=it.get("qty", 1),
+                unit_price=it.get("unit_price", 0.0),
+                line_discount=it.get("line_discount", 0.0),
+                gst_rate=it.get("gst_rate", 5.0),
+                cgst=0, sgst=0, igst=0,
+                taxable_value=round(float(it.get("qty", 1)) * float(it.get("unit_price", 0.0)), 2),
+            )
+            db.add(oi)
+            db.flush()  # Flush to get oi.id
+            
+            if client_line_id:
+                order_items_by_client_id[client_line_id] = oi.id
+
+    return row.id, order_items_by_client_id
+
+def _get_next_kot_number(db: Session, branch_id: str) -> int:
+    """
+    Finds the next sequential KOT number for a given branch.
+    Relies on KitchenTicket being joined to Order to filter by branch.
+    """
+    max_no = (
+        db.query(func.max(KitchenTicket.ticket_no))
+          .select_from(KitchenTicket)
+          .join(Order, Order.id == KitchenTicket.order_id)
+          .filter(Order.branch_id == branch_id)
+          .scalar()
+    )
+    return (max_no or 0) + 1
+
+def _apply_kot(
+    op: dict,
+    *,
+    db: Session,
+    user_id: str,
+    device_id: str | None,
+    order_map: dict[str, str],
+    item_map: dict[str, str],
+) -> int:
+    """
+    Applies a single KitchenTicket operation.
+    Uses the provided maps to link to the parent Order and OrderItems.
+    """
+    payload = op.get("payload") or {}
+
+    # 1. Find the parent Order.id using the order_no_ref
+    order_no_ref = payload.get("order_no_ref")
+    if not order_no_ref:
+        return 0  # Can't link KOT without this
+
+    order_id = order_map.get(order_no_ref)  # Check the map of orders created in this *same* transaction
+    if not order_id:
+        # Not in this transaction, maybe it's an "add-on" KOT for an existing order
+        order = db.query(Order.id).filter(
+            Order.order_no == order_no_ref, 
+            Order.branch_id == payload.get("branch_id")
+        ).first()
+        
+        if order:
+            order_id = order.id
+        else:
+            return 0  # Can't find parent order, skip KOT
+
+    # 2. Get KOT details
+    tenant_id = payload.get("tenant_id")
+    branch_id = payload.get("branch_id")
+    if not (tenant_id and branch_id):
+        return 0  # Missing required fields
+
+    # 3. Generate a new, sequential ticket number for this branch
+    next_ticket_no = _get_next_kot_number(db, branch_id)
+
+    # 4. Create the KitchenTicket
+    kot = KitchenTicket(
+        id=(op.get("entity_id") or str(uuid4())),
+        order_id=order_id,
+        ticket_no=next_ticket_no,  # Use the REAL, sequential ticket number
+        target_station=payload.get("target_station"),
+        status=_enum(KOTStatus, payload.get("status"), KOTStatus.NEW),
+        printed_at=_parse_dt(payload.get("printed_at")) or datetime.now(timezone.utc),
+    )
+    db.add(kot)
+    db.flush()  # Get kot.id
+
+    # 5. Create KitchenTicketItems
+    kot_lines = payload.get("lines")
+    if isinstance(kot_lines, list):
+        for line_payload in kot_lines:
+            if not isinstance(line_payload, dict):
+                continue
+            
+            order_item_client_id = line_payload.get("order_item_client_id")
+            order_item_id = item_map.get(order_item_client_id)  # Find the DB ID for this item
+
+            if not order_item_id:
+                # This item wasn't in the same batch or couldn't be found.
+                # In a real system, you might try to find it by other means,
+                # but for now, we'll skip it.
+                continue
+
+            db.add(KitchenTicketItem(
+                id=str(uuid4()),
+                ticket_id=kot.id,
+                order_item_id=order_item_id,  # Use the resolved DB ID
+                qty=line_payload.get("qty", 1),
+                note=", ".join(line_payload.get("modifiers", []) or []) # Combine modifiers
+            ))
+
+    return 1  # Applied 1 KOT op
 
 
 def apply_ops(ops: Iterable[dict], *, db: Session, user_id: str, device_id: str | None) -> int:
