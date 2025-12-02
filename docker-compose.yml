@@ -29,6 +29,7 @@ services:
     depends_on: [db]
     volumes:
       - ./media:/app/media
+      - ./app:/app/app
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${PORT:-8000}/healthz || exit 1"]
       interval: 10s
