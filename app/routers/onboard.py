@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime
+import os
+import shutil
+import uuid
 
 from app.db import get_db
 from app.config import settings
@@ -185,6 +188,53 @@ def upsert_branch_settings(
     db.commit(); db.refresh(rs)
     _progress(db, body["tenant_id"], step="PRINTERS", note="Restaurant settings saved", completed=False)
     return {"restaurant_settings_id": rs.id, "next": "PRINTERS"}
+
+@router.post("/logo")
+def upload_logo(
+    request: Request,
+    tenant_id: str = Form(...),
+    branch_id: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload logo during onboarding.
+    Requires X-App-Secret.
+    """
+    _require_setup_secret(request)
+    
+    allowed_types = {"image/png", "image/jpeg", "image/jpg"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(400, detail="Only PNG or JPEG allowed")
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in [".png", ".jpg", ".jpeg"]:
+        ext = ".png" if file.content_type == "image/png" else ".jpg"
+
+    unique = f"logo_{tenant_id}_{branch_id}_{uuid.uuid4().hex}{ext}"
+    abs_path = os.path.join(settings.MEDIA_ROOT, unique)
+    with open(abs_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    public_url = f"{settings.MEDIA_URL_BASE}/{unique}"
+
+    rs = (
+        db.query(RestaurantSettings)
+        .filter(
+            RestaurantSettings.tenant_id == tenant_id,
+            RestaurantSettings.branch_id == branch_id,
+        )
+        .first()
+    )
+    if not rs:
+        raise HTTPException(400, detail="Restaurant settings not found")
+
+    if hasattr(rs, "logo_url"):
+        rs.logo_url = public_url
+        db.commit()
+        db.refresh(rs)
+
+    return {"logo_url": public_url}
 
 @router.post("/printers")
 def setup_printers_and_stations(
