@@ -12,7 +12,7 @@ class OrderChannel(PyEnum):
     DINE_IN = "DINE_IN"
     TAKEAWAY = "TAKEAWAY"
     DELIVERY = "DELIVERY"
-    ONLINE = "ONLINE"  # aggregator channels map here
+    ONLINE = "ONLINE"
 
 class OrderStatus(PyEnum):
     OPEN = "OPEN"
@@ -56,9 +56,66 @@ class OnlineProvider(PyEnum):
     SWIGGY = "SWIGGY"
     CUSTOM = "CUSTOM"
 
-# Backup targets (for requirement #9)
 class BackupProvider(PyEnum):
     NONE = "NONE"
+    S3 = "S3"
+    GDRIVE = "GDRIVE"
+    AZURE = "AZURE"
+
+# ── Onboarding ───────────────────────────────────────────────────────────────
+class OnboardProgress(Base, IdMixin, TSMMixin):
+    __tablename__ = "onboard_progress"
+    tenant_id: Mapped[str] = mapped_column(String(36), unique=True)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    step: Mapped[str | None] = mapped_column(String(40))
+    last_note: Mapped[str | None] = mapped_column(Text)
+
+# ── Identity ────────────────────────────────────────────────────────────────
+class Tenant(Base, IdMixin, TSMMixin):
+    __tablename__ = "tenant"
+    name: Mapped[str] = mapped_column(String(160))
+
+class Branch(Base, IdMixin, TSMMixin):
+    __tablename__ = "branch"
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"))
+    name: Mapped[str] = mapped_column(String(160))
+    gstin: Mapped[str | None] = mapped_column(String(32))
+    address: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(String(20))
+    code: Mapped[str] = mapped_column(String(50))
+
+class User(Base, IdMixin, TSMMixin):
+    __tablename__ = "user"
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"))
+    branch_id: Mapped[str | None] = mapped_column(String(36))
+    name: Mapped[str] = mapped_column(String(160))
+    username: Mapped[str | None] = mapped_column(String(160), unique=True, nullable=True)
+    mobile: Mapped[str | None] = mapped_column(String(20))
+    email: Mapped[str | None] = mapped_column(String(160))
+    pass_hash: Mapped[str] = mapped_column(String(200))
+    pin_hash: Mapped[str | None] = mapped_column(String(200))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+class Role(Base, IdMixin, TSMMixin):
+    __tablename__ = "role"
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"))
+    code: Mapped[str] = mapped_column(String(60))
+
+class Permission(Base, IdMixin, TSMMixin):
+    __tablename__ = "permission"
+    code: Mapped[str] = mapped_column(String(60), unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+
+class RolePermission(Base, TSMMixin):
+    __tablename__ = "role_permission"
+    role_id: Mapped[str] = mapped_column(String(36), ForeignKey("role.id"), primary_key=True)
+    permission_id: Mapped[str] = mapped_column(String(36), ForeignKey("permission.id"), primary_key=True)
+
+class UserRole(Base, TSMMixin):
+    __tablename__ = "user_role"
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("user.id"), primary_key=True)
+    role_id: Mapped[str] = mapped_column(String(36), ForeignKey("role.id"), primary_key=True)
+
 # ── Printers & Stations ─────────────────────────────────────────────────────
 class Printer(Base, IdMixin, TSMMixin):
     __tablename__ = "printer"
@@ -66,11 +123,10 @@ class Printer(Base, IdMixin, TSMMixin):
     branch_id: Mapped[str] = mapped_column(String(36))
     name: Mapped[str] = mapped_column(String(120))
     type: Mapped[PrinterType] = mapped_column(Enum(PrinterType))
-    connection_url: Mapped[str | None] = mapped_column(String(300))  # local agent webhook or IP:port
+    connection_url: Mapped[str | None] = mapped_column(String(300))
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Cash drawer support (requirement #10)
     cash_drawer_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    cash_drawer_code: Mapped[str | None] = mapped_column(String(30))  # e.g. "PULSE_2_100"
+    cash_drawer_code: Mapped[str | None] = mapped_column(String(30))
 
 class KitchenStation(Base, IdMixin, TSMMixin):
     __tablename__ = "kitchen_station"
@@ -85,7 +141,6 @@ class RestaurantSettings(Base, IdMixin, TSMMixin):
     tenant_id: Mapped[str] = mapped_column(String(36))
     branch_id: Mapped[str] = mapped_column(String(36))
     name: Mapped[str] = mapped_column(String(200))
-    # already present; keep as optional
     logo_url: Mapped[str | None] = mapped_column(String(400))
     address: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(String(20))
@@ -121,7 +176,6 @@ class MenuItem(Base, IdMixin, TSMMixin):
     tax_inclusive: Mapped[bool] = mapped_column(Boolean, default=True)
     gst_rate: Mapped[float] = mapped_column(Numeric(5, 2), default=5.00)
     kitchen_station_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("kitchen_station.id"))
-    # NEW: optional primary image for the item
     image_url: Mapped[str | None] = mapped_column(String(400))
 
 class ItemVariant(Base, IdMixin, TSMMixin):
@@ -131,7 +185,6 @@ class ItemVariant(Base, IdMixin, TSMMixin):
     mrp: Mapped[float | None] = mapped_column(Numeric(10, 2))
     base_price: Mapped[float] = mapped_column(Numeric(10, 2))
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-    # NEW: optional variant image (e.g., size/pack shot)
     image_url: Mapped[str | None] = mapped_column(String(400))
 
 class ModifierGroup(Base, IdMixin, TSMMixin):
@@ -157,7 +210,7 @@ class ItemModifierGroup(Base, TSMMixin):
 class DiningTable(Base, IdMixin, TSMMixin):
     __tablename__ = "dining_table"
     branch_id: Mapped[str] = mapped_column(String(36))
-    code: Mapped[str] = mapped_column(String(30))  # per-branch unique (not global)
+    code: Mapped[str] = mapped_column(String(30))
     zone: Mapped[str | None] = mapped_column(String(30))
     seats: Mapped[int | None]
     __table_args__ = (
@@ -169,14 +222,14 @@ class Customer(Base, IdMixin, TSMMixin):
     tenant_id: Mapped[str] = mapped_column(String(36))
     name: Mapped[str] = mapped_column(String(160))
     phone: Mapped[str | None] = mapped_column(String(20))
-    state_code: Mapped[str | None] = mapped_column(String(2))  # for IGST vs CGST/SGST
+    state_code: Mapped[str | None] = mapped_column(String(2))
 
 # ── Orders / KOT / Payments / Invoice / Tax ─────────────────────────────────
 class Order(Base, IdMixin, TSMMixin):
     __tablename__ = "order"
     tenant_id: Mapped[str] = mapped_column(String(36))
     branch_id: Mapped[str] = mapped_column(String(36))
-    order_no: Mapped[str] = mapped_column(String(60))  # string order no
+    order_no: Mapped[str] = mapped_column(String(60))
     channel: Mapped[OrderChannel] = mapped_column(Enum(OrderChannel))
     provider: Mapped[OnlineProvider | None] = mapped_column(Enum(OnlineProvider), nullable=True)
     status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), default=OrderStatus.OPEN)
@@ -248,7 +301,7 @@ class Invoice(Base, IdMixin, TSMMixin):
     place_of_supply: Mapped[str | None] = mapped_column(String(60))
     round_off: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
     reprint_count: Mapped[int] = mapped_column(default=0)
-    cashier_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("user.id"))  # for invoice print
+    cashier_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("user.id"))
 
 class TaxRate(Base, IdMixin, TSMMixin):
     __tablename__ = "tax_rate"
@@ -275,7 +328,7 @@ class Shift(Base, IdMixin, TSMMixin):
 class CashMovement(Base, IdMixin, TSMMixin):
     __tablename__ = "cash_movement"
     shift_id: Mapped[str] = mapped_column(String(36), ForeignKey("shift.id"))
-    kind: Mapped[str] = mapped_column(String(10))  # PAYIN/PAYOUT
+    kind: Mapped[str] = mapped_column(String(10))
     amount: Mapped[float] = mapped_column(Numeric(10, 2))
     reason: Mapped[str | None] = mapped_column(Text)
 
@@ -285,7 +338,7 @@ class AuditLog(Base, IdMixin, TSMMixin):
     entity: Mapped[str] = mapped_column(String(60))
     entity_id: Mapped[str] = mapped_column(String(36))
     action: Mapped[str] = mapped_column(String(60))
-    reason: Mapped[str | None] = mapped_column(Text)  # reason for void/reprint/cancel
+    reason: Mapped[str | None] = mapped_column(Text)
     before: Mapped[str | None] = mapped_column(Text)
     after: Mapped[str | None] = mapped_column(Text)
 
@@ -295,13 +348,12 @@ class SyncEvent(Base, TSMMixin):
     seq: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     entity: Mapped[str] = mapped_column(String(60))
     entity_id: Mapped[str] = mapped_column(String(36))
-    op: Mapped[str] = mapped_column(String(10))  # UPSERT/DELETE
+    op: Mapped[str] = mapped_column(String(10))
     payload: Mapped[str | None] = mapped_column(Text)
     device_id: Mapped[str | None] = mapped_column(String(36))
-    __table_args__ = (  #  fast pulls
+    __table_args__ = (
         Index("ix_sync_event_seq", "seq"),
     )
-
 
 class SyncCheckpoint(Base, TSMMixin):
     __tablename__ = "sync_checkpoint"
@@ -315,7 +367,6 @@ class Ingredient(Base, IdMixin, TSMMixin):
     name: Mapped[str] = mapped_column(String(160))
     uom: Mapped[str] = mapped_column(String(20))
     min_level: Mapped[float] = mapped_column(Numeric(12, 3), default=0)
-    # NEW: optional image for ingredient (pack photo, reference)
     image_url: Mapped[str | None] = mapped_column(String(400))
 
 class RecipeBOM(Base, TSMMixin):
@@ -363,12 +414,11 @@ class BackupConfig(Base, IdMixin, TSMMixin):
     branch_id: Mapped[str] = mapped_column(String(36))
     provider: Mapped[BackupProvider] = mapped_column(Enum(BackupProvider), default=BackupProvider.NONE)
     local_dir: Mapped[str | None] = mapped_column(String(400))
-    # generic cloud creds (keep minimal; secure in real prod)
-    endpoint: Mapped[str | None] = mapped_column(String(400))   # e.g. S3 endpoint
+    endpoint: Mapped[str | None] = mapped_column(String(400))
     bucket: Mapped[str | None] = mapped_column(String(120))
     access_key: Mapped[str | None] = mapped_column(String(200))
     secret_key: Mapped[str | None] = mapped_column(String(200))
-    schedule_cron: Mapped[str | None] = mapped_column(String(120))  # "0 3 * * *" daily 3am
+    schedule_cron: Mapped[str | None] = mapped_column(String(120))
 
 class BackupRun(Base, IdMixin, TSMMixin):
     __tablename__ = "backup_run"
@@ -377,18 +427,17 @@ class BackupRun(Base, IdMixin, TSMMixin):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ok: Mapped[bool] = mapped_column(Boolean, default=False)
     bytes_total: Mapped[int | None] = mapped_column(Integer)
-    location: Mapped[str | None] = mapped_column(String(400))  # local path or cloud uri
+    location: Mapped[str | None] = mapped_column(String(400))
     error: Mapped[str | None] = mapped_column(Text)
 
 # ── Report snapshot tables (requirements #7 & #11) ──────────────────────────
 class ReportDailySales(Base, IdMixin, TSMMixin):
     __tablename__ = "report_daily_sales"
-    # one row per (date, branch, channel?, provider?) — enforced via unique constraint
     date: Mapped[datetime] = mapped_column(Date)
     tenant_id: Mapped[str] = mapped_column(String(36))
     branch_id: Mapped[str] = mapped_column(String(36))
-    channel: Mapped[str | None] = mapped_column(String(20))       # e.g. "DINE_IN"/"ONLINE"/None
-    provider: Mapped[str | None] = mapped_column(String(20))      # e.g. "ZOMATO"/"SWIGGY"/None
+    channel: Mapped[str | None] = mapped_column(String(20))
+    provider: Mapped[str | None] = mapped_column(String(20))
     orders_count: Mapped[int] = mapped_column(Integer, default=0)
     gross: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
     tax: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
@@ -412,7 +461,6 @@ class ReportStockSnapshot(Base, IdMixin, TSMMixin):
     __table_args__ = (
         UniqueConstraint("at_date", "ingredient_id", name="uq_report_stock_snapshot_key"),
     )
-
 
 class SyncIdempotency(Base, TSMMixin):
     __tablename__ = "sync_idempotency"

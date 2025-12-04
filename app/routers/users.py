@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.db import get_db
-from app.deps import require_perm
+from app.deps import require_perm, require_auth, AuthCtx
 from app.util.security import hash_pw
 from app.models.core import (
     Tenant,
