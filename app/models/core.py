@@ -59,18 +59,6 @@ class OnlineProvider(PyEnum):
 # Backup targets (for requirement #9)
 class BackupProvider(PyEnum):
     NONE = "NONE"
-    S3 = "S3"
-    GDRIVE = "GDRIVE"
-    AZURE = "AZURE"
-
-# ── Onboarding ───────────────────────────────────────────────────────────────
-class OnboardProgress(Base, IdMixin, TSMMixin):
-    __tablename__ = "onboard_progress"
-class UserRole(Base, TSMMixin):
-    __tablename__ = "user_role"
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("user.id"), primary_key=True)
-    role_id: Mapped[str] = mapped_column(String(36), ForeignKey("role.id"), primary_key=True)
-
 # ── Printers & Stations ─────────────────────────────────────────────────────
 class Printer(Base, IdMixin, TSMMixin):
     __tablename__ = "printer"
