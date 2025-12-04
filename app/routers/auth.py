@@ -35,17 +35,27 @@ def _s(v):
 
 @router.post("/login", response_model=Token)
 def login(
-    mobile: str,
+    mobile: str | None = None,
+    username: str | None = None,
     password: str | None = None,
     pin: str | None = None,
     db: Session = Depends(get_db),
 ):
     """
     Auth by either:
-    - mobile + password
-    - mobile + pin
+    - mobile + password/pin
+    - username + password/pin
     """
-    user = db.query(User).filter(User.mobile == mobile).first()
+    if not mobile and not username:
+        raise HTTPException(status_code=400, detail="Either mobile or username is required")
+
+    user = None
+    if username:
+        user = db.query(User).filter(User.username == username).first()
+    
+    if not user and mobile:
+        user = db.query(User).filter(User.mobile == mobile).first()
+
     if not user or not bool(user.active):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 

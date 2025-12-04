@@ -83,22 +83,6 @@ class Branch(Base, IdMixin, TSMMixin):
     gstin: Mapped[str | None] = mapped_column(String(32))
     address: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(String(20))
-    state_code: Mapped[str | None] = mapped_column(String(2))  # e.g. "MH" for Maharashtra
-
-class User(Base, IdMixin, TSMMixin):
-    __tablename__ = "user"
-    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"))
-    branch_id: Mapped[str | None] = mapped_column(String(36))
-    name: Mapped[str] = mapped_column(String(160))
-    mobile: Mapped[str | None] = mapped_column(String(20))
-    email: Mapped[str | None] = mapped_column(String(160))
-    pass_hash: Mapped[str] = mapped_column(String(200))
-    pin_hash: Mapped[str | None] = mapped_column(String(200))
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
-
-class Role(Base, IdMixin, TSMMixin):
-    __tablename__ = "role"
-    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"))
     code: Mapped[str] = mapped_column(String(50))
 
 class Permission(Base, IdMixin, TSMMixin):

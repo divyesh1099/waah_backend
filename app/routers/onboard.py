@@ -108,9 +108,12 @@ def create_tenant_and_admin(
     """
     _require_setup_secret(request)
 
-    for field in ("tenant_name", "admin_name", "mobile", "password"):
+    for field in ("tenant_name", "admin_name", "password"):
         if not body.get(field):
             raise HTTPException(400, detail=f"missing field: {field}")
+            
+    if not body.get("mobile") and not body.get("username"):
+        raise HTTPException(400, detail="missing field: mobile or username")
 
     # Create tenant
     t = Tenant(name=body["tenant_name"])
@@ -120,7 +123,8 @@ def create_tenant_and_admin(
     u = User(
         tenant_id=t.id,
         name=body["admin_name"],
-        mobile=body["mobile"],
+        username=body.get("username"),
+        mobile=body.get("mobile"),
         email=body.get("email"),
         pass_hash=hash_pw(body["password"]),
         pin_hash=hash_pw(body["pin"]) if body.get("pin") else None,

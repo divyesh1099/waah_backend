@@ -50,7 +50,7 @@ def create_user(
     if not db.get(Tenant, tid):
         raise HTTPException(400, detail=f"Invalid tenant_id: {tid}")
 
-    # 3) check mobile uniqueness inside tenant
+    # 3) check mobile/username uniqueness inside tenant
     mobile = body.get("mobile")
     if mobile:
         dup = (
@@ -65,11 +65,26 @@ def create_user(
         if dup:
             raise HTTPException(409, detail="Mobile already exists")
 
+    username = body.get("username")
+    if username:
+        dup = (
+            db.query(User)
+            .filter(
+                User.tenant_id == tid,
+                User.username == username,
+                User.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if dup:
+            raise HTTPException(409, detail="Username already exists")
+
     # 4) create the user
     u = User(
         tenant_id=tid,
         branch_id=body.get("branch_id"),
         name=body["name"],
+        username=body.get("username"),
         mobile=body.get("mobile"),
         email=body.get("email"),
         pass_hash=hash_pw(body.get("password", "admin")),
