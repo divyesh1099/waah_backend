@@ -390,6 +390,25 @@ def update_printer(
     return {"id": p.id}
 
 
+@router.delete("/printers/{printer_id}")
+def delete_printer(
+    printer_id: str,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    p = db.get(Printer, printer_id)
+    if not p:
+        raise HTTPException(404, detail="printer not found")
+
+    if getattr(p, "tenant_id", None) != ctx.tenant_id or getattr(p, "branch_id", None) != ctx.branch_id:
+        raise HTTPException(404, detail="not found")
+
+    db.delete(p)
+    db.commit()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------
 # Kitchen stations
 # ---------------------------------------------------------------------
