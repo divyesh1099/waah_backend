@@ -82,6 +82,7 @@ class Branch(Base, IdMixin, TSMMixin):
     gstin: Mapped[str | None] = mapped_column(String(32))
     address: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(String(20))
+    state_code: Mapped[str | None] = mapped_column(String(2))
     code: Mapped[str] = mapped_column(String(50))
 
 class User(Base, IdMixin, TSMMixin):
