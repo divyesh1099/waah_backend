@@ -66,35 +66,6 @@ class BackupProvider(PyEnum):
 # ── Onboarding ───────────────────────────────────────────────────────────────
 class OnboardProgress(Base, IdMixin, TSMMixin):
     __tablename__ = "onboard_progress"
-    tenant_id: Mapped[str] = mapped_column(String(36), unique=True)
-    completed: Mapped[bool] = mapped_column(Boolean, default=False)
-    step: Mapped[str | None] = mapped_column(String(40))    # ADMIN | BRANCH | SETTINGS | PRINTERS | FINISH
-    last_note: Mapped[str | None] = mapped_column(Text)
-
-# ── Identity ────────────────────────────────────────────────────────────────
-class Tenant(Base, IdMixin, TSMMixin):
-    __tablename__ = "tenant"
-    name: Mapped[str] = mapped_column(String(160))
-
-class Branch(Base, IdMixin, TSMMixin):
-    __tablename__ = "branch"
-    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"))
-    name: Mapped[str] = mapped_column(String(160))
-    gstin: Mapped[str | None] = mapped_column(String(32))
-    address: Mapped[str | None] = mapped_column(Text)
-    phone: Mapped[str | None] = mapped_column(String(20))
-    code: Mapped[str] = mapped_column(String(50))
-
-class Permission(Base, IdMixin, TSMMixin):
-    __tablename__ = "permission"
-    code: Mapped[str] = mapped_column(String(60), unique=True)  # e.g. DISCOUNT, VOID, REPRINT, MANAGER_APPROVE
-    description: Mapped[str | None] = mapped_column(Text)
-
-class RolePermission(Base, TSMMixin):
-    __tablename__ = "role_permission"
-    role_id: Mapped[str] = mapped_column(String(36), ForeignKey("role.id"), primary_key=True)
-    permission_id: Mapped[str] = mapped_column(String(36), ForeignKey("permission.id"), primary_key=True)
-
 class UserRole(Base, TSMMixin):
     __tablename__ = "user_role"
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("user.id"), primary_key=True)
