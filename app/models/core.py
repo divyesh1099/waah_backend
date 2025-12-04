@@ -88,6 +88,7 @@ class Branch(Base, IdMixin, TSMMixin):
 class User(Base, IdMixin, TSMMixin):
     __tablename__ = "user"
     tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"))
+    branch_id: Mapped[str | None] = mapped_column(String(36))
     name: Mapped[str] = mapped_column(String(160))
     mobile: Mapped[str | None] = mapped_column(String(20))
     email: Mapped[str | None] = mapped_column(String(160))
@@ -383,6 +384,7 @@ class RecipeBOM(Base, TSMMixin):
 class StockMove(Base, IdMixin, TSMMixin):
     __tablename__ = "stock_move"
     ingredient_id: Mapped[str] = mapped_column(String(36), ForeignKey("ingredient.id"))
+    branch_id: Mapped[str | None] = mapped_column(String(36))
     type: Mapped[StockMoveType] = mapped_column(Enum(StockMoveType))
     qty_change: Mapped[float] = mapped_column(Numeric(12, 3))
     reason: Mapped[str | None] = mapped_column(Text)
@@ -392,6 +394,7 @@ class StockMove(Base, IdMixin, TSMMixin):
 class Purchase(Base, IdMixin, TSMMixin):
     __tablename__ = "purchase"
     tenant_id: Mapped[str] = mapped_column(String(36))
+    branch_id: Mapped[str | None] = mapped_column(String(36))
     supplier: Mapped[str | None] = mapped_column(String(160))
     note: Mapped[str | None] = mapped_column(Text)
 

@@ -267,6 +267,7 @@ def list_tickets(
     status: Optional[str] = None,
     start_dt: Optional[datetime] = None,
     end_dt: Optional[datetime] = None,
+    branch_id: Optional[str] = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
@@ -287,8 +288,9 @@ def list_tickets(
     # Tenant/branch scoping
     if hasattr(Order, "tenant_id"):
         q = q.filter(Order.tenant_id == ctx.tenant_id)
-    if ctx.branch_id and hasattr(Order, "branch_id"):
-        q = q.filter(Order.branch_id == ctx.branch_id)
+    eff_branch = ctx.branch_id or (branch_id or "").strip()
+    if eff_branch and hasattr(Order, "branch_id"):
+        q = q.filter(Order.branch_id == eff_branch)
 
     # Optional status filter (expects values like NEW / IN_PROGRESS / READY)
     if status:

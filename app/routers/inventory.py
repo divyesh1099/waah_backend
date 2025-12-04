@@ -37,12 +37,11 @@ def _to_float(val):
     except Exception:
         return 0.0
 
-def _qty_on_hand(db: Session, ingredient_id: str) -> float:
-    total = (
-        db.query(func.coalesce(func.sum(StockMove.qty_change), 0))
-        .filter(StockMove.ingredient_id == ingredient_id)
-        .scalar()
-    )
+def _qty_on_hand(db: Session, ingredient_id: str, branch_id: str | None = None) -> float:
+    q = db.query(func.coalesce(func.sum(StockMove.qty_change), 0)).filter(StockMove.ingredient_id == ingredient_id)
+    if branch_id:
+        q = q.filter(StockMove.branch_id == branch_id)
+    total = q.scalar()
     if total is None:
         return 0.0
     if isinstance(total, Decimal):
@@ -95,6 +94,7 @@ def add_ingredient(
 @router.get("/ingredients")
 def list_ingredients(
     tenant_id: str | None = None,
+    branch_id: str | None = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
@@ -115,6 +115,9 @@ def list_ingredients(
     # tenant isolation: ignore mismatched tenant_id hints
     q = db.query(Ingredient).filter(Ingredient.tenant_id == ctx.tenant_id)
 
+    # effective branch for stock calculation
+    eff_branch = ctx.branch_id or (branch_id or "").strip()
+
     out = []
     for ing in q.order_by(Ingredient.name.asc()).all():
         out.append({
@@ -123,7 +126,7 @@ def list_ingredients(
             "name": ing.name,
             "uom": ing.uom,
             "min_level": _to_float(getattr(ing, "min_level", 0)),
-            "qty_on_hand": _qty_on_hand(db, ing.id),
+            "qty_on_hand": _qty_on_hand(db, ing.id, eff_branch),
         })
     return out
 
@@ -214,6 +217,7 @@ def purchase(
     """
     body = {
       "tenant_id": "...",
+      "branch_id": "...",
       "supplier": "...",
       "note": "...",
       "lines": [
@@ -226,8 +230,16 @@ def purchase(
     - create PurchaseLine
     - create StockMove (type=PURCHASE, +qty_change)
     """
+    branch_id = body.get("branch_id")
+    # if ctx.branch_id is set, enforce it
+    if ctx.branch_id and branch_id and branch_id != ctx.branch_id:
+         raise HTTPException(400, detail="branch_id mismatch")
+    if ctx.branch_id:
+         branch_id = ctx.branch_id
+
     p = Purchase(
         tenant_id=ctx.tenant_id,  # force to caller's tenant
+        branch_id=branch_id,
         supplier=body.get("supplier"),
         note=body.get("note"),
     )
@@ -249,6 +261,7 @@ def purchase(
         db.add(
             StockMove(
                 ingredient_id=ing.id,
+                branch_id=branch_id,
                 type=StockMoveType.PURCHASE,
                 qty_change=l["qty"],
                 reason=f"Purchase {p.id}",
@@ -265,6 +278,7 @@ def purchase(
 
 @router.get("/low_stock")
 def low_stock(
+    branch_id: str | None = None,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
@@ -273,16 +287,17 @@ def low_stock(
     Used by dashboard / alert UI.
     """
     # Sum quantities only for this tenant's ingredients
-    sums = (
-        db.query(
+    eff_branch = ctx.branch_id or (branch_id or "").strip()
+
+    q = db.query(
             StockMove.ingredient_id,
             func.coalesce(func.sum(StockMove.qty_change), 0),
-        )
-        .join(Ingredient, Ingredient.id == StockMove.ingredient_id)
-        .filter(Ingredient.tenant_id == ctx.tenant_id)
-        .group_by(StockMove.ingredient_id)
-        .all()
-    )
+        ).join(Ingredient, Ingredient.id == StockMove.ingredient_id).filter(Ingredient.tenant_id == ctx.tenant_id)
+    
+    if eff_branch:
+        q = q.filter(StockMove.branch_id == eff_branch)
+
+    sums = q.group_by(StockMove.ingredient_id).all()
     levels = {ing_id: float(qty) for ing_id, qty in sums}
 
     res = []

@@ -77,6 +77,7 @@ def list_orders(
     start_dt: Optional[datetime] = None,
     end_dt: Optional[datetime] = None,
     page: int = 1,
+    branch_id: Optional[str] = None,
     size: int = 20,
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
@@ -100,8 +101,9 @@ def list_orders(
     # tenant/branch scoping
     if hasattr(Order, "tenant_id"):
         q = q.filter(Order.tenant_id == ctx.tenant_id)
-    if ctx.branch_id and hasattr(Order, "branch_id"):
-        q = q.filter(Order.branch_id == ctx.branch_id)
+    eff_branch = ctx.branch_id or (branch_id or "").strip()
+    if eff_branch and hasattr(Order, "branch_id"):
+        q = q.filter(Order.branch_id == eff_branch)
 
     # optional filter by status
     if status:
@@ -304,6 +306,7 @@ def add_item(order_id: str, body: OrderItemIn, db: Session = Depends(get_db), ct
         db.add(
             StockMove(
                 ingredient_id=r.ingredient_id,
+                branch_id=order.branch_id,
                 type=StockMoveType.SALE,
                 qty_change=-qty_delta,  # Decimal with 3dp
                 reason=f"Order {order_id}",

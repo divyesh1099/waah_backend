@@ -266,6 +266,31 @@ def get_restaurant(
     }
 
 
+@router.delete("/restaurant")
+def delete_restaurant(
+    tenant_id: str,
+    branch_id: str,
+    db: Session = Depends(get_db),
+    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    _assert_ctx_matches(ctx, tenant_id, branch_id)
+
+    rs = (
+        db.query(RestaurantSettings)
+        .filter(
+            RestaurantSettings.tenant_id == tenant_id,
+            RestaurantSettings.branch_id == branch_id,
+        )
+        .first()
+    )
+    if rs:
+        db.delete(rs)
+        db.commit()
+
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------
 # Printers
 # ---------------------------------------------------------------------

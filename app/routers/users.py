@@ -68,6 +68,7 @@ def create_user(
     # 4) create the user
     u = User(
         tenant_id=tid,
+        branch_id=body.get("branch_id"),
         name=body["name"],
         mobile=body.get("mobile"),
         email=body.get("email"),
@@ -101,8 +102,10 @@ def create_user(
 @router.get("/", summary="List users (basic info + roles)")
 def list_users(
     tenant_id: str | None = None,
+    branch_id: str | None = None,
     db: Session = Depends(get_db),
     sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    ctx: AuthCtx = Depends(require_auth),
 ):
     """
     [
@@ -122,6 +125,10 @@ def list_users(
     q = db.query(User).filter(User.deleted_at.is_(None))
     if tenant_id:
         q = q.filter(User.tenant_id == tenant_id)
+    
+    eff_branch = ctx.branch_id or (branch_id or "").strip()
+    if eff_branch:
+        q = q.filter(User.branch_id == eff_branch)
 
     users = (
         q.order_by(User.created_at.desc())
@@ -142,6 +149,7 @@ def list_users(
         {
             "id": u.id,
             "tenant_id": u.tenant_id,
+            "branch_id": getattr(u, "branch_id", None),
             "name": u.name,
             "mobile": u.mobile,
             "email": u.email,
