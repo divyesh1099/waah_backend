@@ -9,7 +9,7 @@ from app.deps import require_perm, require_auth, AuthCtx
 from app.models.core import (
     ReportDailySales, ReportStockSnapshot,
     Order, OrderStatus, OrderItem, StockMove, StockMoveType,
-    MenuItem, MenuCategory, Payment, PayMode
+    MenuItem, MenuCategory, Payment, PayMode, ItemVariant
 )
 from app.services.billing import _money, compute_bill
 
