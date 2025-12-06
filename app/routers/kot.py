@@ -15,6 +15,7 @@ from app.models.core import (
     KitchenStation,
     KOTStatus,
     Order,
+    OrderStatus,
     OrderItem,
     OrderItemModifier,
     MenuItem,
@@ -421,6 +422,45 @@ def update_ticket_status(
             after=new_status,
         )
     )
+
+    # CRITICAL: Update Order status based on KOT completion
+    # When all KOTs are DONE, update Order to READY
+    order = db.query(Order).filter(Order.id == t.order_id).first()
+    if order:
+        # Get all KOTs for this order
+        all_kots = db.query(KitchenTicket).filter(KitchenTicket.order_id == t.order_id).all()
+        
+        if all_kots:
+            # Check if all KOTs are DONE
+            all_done = all(kot.status == KOTStatus.DONE for kot in all_kots)
+            # Check if all KOTs are READY or DONE
+            all_ready_or_done = all(kot.status in [KOTStatus.READY, KOTStatus.DONE] for kot in all_kots)
+            
+            old_order_status = order.status
+            new_order_status = None
+            
+            if all_done and order.status != OrderStatus.READY:
+                # All KOTs done → Order should be READY
+                new_order_status = OrderStatus.READY
+                order.status = OrderStatus.READY
+            elif all_ready_or_done and order.status == OrderStatus.KITCHEN:
+                # All KOTs are at least READY → Order should be READY
+                new_order_status = OrderStatus.READY
+                order.status = OrderStatus.READY
+            
+            # Log the order status change if it happened
+            if new_order_status and old_order_status != new_order_status:
+                db.add(
+                    AuditLog(
+                        actor_user_id=ctx.user_id,
+                        entity="Order",
+                        entity_id=t.order_id,
+                        action="STATUS_CHANGE",
+                        reason="Auto-update from KOT completion",
+                        before=old_order_status.name,
+                        after=new_order_status.name,
+                    )
+                )
 
     db.commit()
     db.refresh(t)
