@@ -463,17 +463,26 @@ def test_printer(
     import httpx
     import asyncio
     from datetime import datetime, timezone
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f"🧪 Test printer called for ID: {printer_id}")
     
     p = db.get(Printer, printer_id)
     if not p:
+        logger.error(f"❌ Printer not found: {printer_id}")
         raise HTTPException(404, detail="printer not found")
 
     if getattr(p, "tenant_id", None) != ctx.tenant_id or getattr(p, "branch_id", None) != ctx.branch_id:
+        logger.error(f"❌ Permission denied for printer: {printer_id}")
         raise HTTPException(404, detail="not found")
 
     if not p.connection_url:
+        logger.error(f"❌ Printer has no URL: {printer_id}")
         raise HTTPException(400, detail="Printer has no connection URL configured")
 
+    logger.info(f"📡 Sending test print to: {p.connection_url}")
+    
     # Build test print payload
     test_payload = {
         "type": "test",
@@ -501,11 +510,13 @@ def test_printer(
     try:
         async def send_print():
             async with httpx.AsyncClient(timeout=10.0) as client:
+                logger.info(f"🚀 POSTing to {p.connection_url}")
                 resp = await client.post(p.connection_url, json=test_payload)
                 resp.raise_for_status()
                 return resp.json()
         
         result = asyncio.run(send_print())
+        logger.info(f"✅ Test print SUCCESS: {result}")
         
         return {
             "ok": True,
@@ -513,8 +524,10 @@ def test_printer(
             "printer_response": result
         }
     except httpx.HTTPError as e:
+        logger.error(f"❌ HTTP Error: {e}")
         raise HTTPException(502, detail=f"Printer connection failed: {str(e)}")
     except Exception as e:
+        logger.error(f"❌ Exception: {type(e).__name__}: {e}")
         raise HTTPException(500, detail=f"Test print failed: {str(e)}")
 
 
