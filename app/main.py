@@ -32,8 +32,11 @@ from app.routers import (
 
 app = FastAPI(title="Waah API", version="0.3.1")
 
+from app.fix_schema import check_and_fix_schema
+
 @app.on_event("startup")
 def init_db():
+    check_and_fix_schema(engine)
     Base.metadata.create_all(bind=engine)
 
 # Serve uploaded media
