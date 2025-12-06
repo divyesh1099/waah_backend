@@ -35,6 +35,7 @@ def check_and_fix_schema(engine: Engine):
             logger.error(f"Failed to check/add user.username: {e}")
             conn.rollback()
             
+             
         # 3. branch.code
         try:
             # We need to know if we are adding it, because if existing rows have NULL, it might be an issue.
@@ -50,5 +51,19 @@ def check_and_fix_schema(engine: Engine):
         except Exception as e:
              logger.error(f"Failed to check/add branch.code: {e}")
              conn.rollback()
+
+        # 4. order.order_no type fix (Integer -> Varchar)
+        try:
+            # Check current type
+            # Note: "order" is a reserved word so we query carefully or rely on string 'order'
+            result = conn.execute(text("SELECT data_type FROM information_schema.columns WHERE table_name = 'order' AND column_name = 'order_no'"))
+            row = result.fetchone()
+            if row and row[0] != 'character varying':
+                logger.info(f"Fixing order.order_no type (current: {row[0]})")
+                conn.execute(text('ALTER TABLE "order" ALTER COLUMN order_no TYPE VARCHAR(60) USING order_no::VARCHAR'))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to fix order.order_no type: {e}")
+            conn.rollback()
              
     logger.info("Schema check complete.")

@@ -1,0 +1,194 @@
+(psycopg.errors.DatatypeMismatch) column "order_no" is of type integer but expression is of type character varying
+LINE 1: ...ed_at, version) VALUES ($1::VARCHAR, $2::VARCHAR, $3::VARCHA...
+                                                             ^
+HINT:  You will need to rewrite or cast the expression.
+[SQL: INSERT INTO "order" (tenant_id, branch_id, order_no, channel, provider, status, table_id, customer_id, opened_by_user_id, closed_by_user_id, pax, source_device_id, note, opened_at, closed_at, id, created_at, updated_at, deleted_at, version) VALUES (%(tenant_id)s::VARCHAR, %(branch_id)s::VARCHAR, %(order_no)s::VARCHAR, %(channel)s, %(provider)s, %(status)s, %(table_id)s::VARCHAR, %(customer_id)s::VARCHAR, %(opened_by_user_id)s::VARCHAR, %(closed_by_user_id)s::VARCHAR, %(pax)s::INTEGER, %(source_device_id)s::VARCHAR, %(note)s::VARCHAR, %(opened_at)s::TIMESTAMP WITHOUT TIME ZONE, %(closed_at)s::TIMESTAMP WITHOUT TIME ZONE, %(id)s::VARCHAR, %(created_at)s::TIMESTAMP WITH TIME ZONE, %(updated_at)s::TIMESTAMP WITH TIME ZONE, %(deleted_at)s::TIMESTAMP WITH TIME ZONE, %(version)s::INTEGER)]
+[parameters: {'tenant_id': '3b191f1f-cb1e-47e5-b999-08f5868d1fcb', 'branch_id': '72bec2ba-6f6a-42db-afe5-7e861f6caacf', 'order_no': 'ORD-1765042731', 'channel': 'DINE_IN', 'provider': None, 'status': 'OPEN', 'table_id': None, 'customer_id': None, 'opened_by_user_id': '86f8046f-744d-49fa-995c-58dcafcd729f', 'closed_by_user_id': None, 'pax': 2, 'source_device_id': None, 'note': None, 'opened_at': datetime.datetime(2025, 12, 6, 17, 38, 51, 143020, tzinfo=datetime.timezone.utc), 'closed_at': None, 'id': '21a3d99f-9ece-41d1-97cb-fd7b271b3e8b', 'created_at': datetime.datetime(2025, 12, 6, 17, 38, 51, 144530, tzinfo=datetime.timezone.utc), 'updated_at': datetime.datetime(2025, 12, 6, 17, 38, 51, 144530, tzinfo=datetime.timezone.utc), 'deleted_at': None, 'version': 1}]
+(Background on this error at: https://sqlalche.me/e/20/f405)Traceback (most recent call last):
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\default.py", line 941, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\psycopg\cursor.py", line 97, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.DatatypeMismatch: column "order_no" is of type integer but expression is of type character varying
+LINE 1: ...ed_at, version) VALUES ($1::VARCHAR, $2::VARCHAR, $3::VARCHA...
+                                                             ^
+HINT:  You will need to rewrite or cast the expression.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\test_order_status.py", line 93, in <module>
+    test_order_status_lifecycle()
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\test_order_status.py", line 59, in test_order_status_lifecycle
+    r = client.post("/orders/", json=payload, headers=headers)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\testclient.py", line 597, in post
+    return super().post(
+           ^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\httpx\_client.py", line 1157, in post
+    return self.request(
+           ^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\testclient.py", line 488, in request
+    return super().request(
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\httpx\_client.py", line 837, in request
+    return self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\httpx\_client.py", line 926, in send
+    response = self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\httpx\_client.py", line 954, in _send_handling_auth
+    response = self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\httpx\_client.py", line 991, in _send_handling_redirects
+    response = self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\httpx\_client.py", line 1027, in _send_single_request
+    response = transport.handle_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\testclient.py", line 381, in handle_request
+    raise exc
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\testclient.py", line 378, in handle_request
+    portal.call(self.app, scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\anyio\from_thread.py", line 321, in call
+    return cast(T_Retval, self.start_task_soon(func, *args).result())
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\concurrent\futures\_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\concurrent\futures\_base.py", line 401, in __get_result
+    raise self._exception
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\anyio\from_thread.py", line 252, in _call_func
+    retval = await retval_or_awaitable
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\fastapi\applications.py", line 1054, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\applications.py", line 113, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\middleware\errors.py", line 187, in __call__
+    raise exc
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\middleware\errors.py", line 165, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\middleware\base.py", line 185, in __call__
+    with collapse_excgroups():
+         ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\_utils.py", line 83, in collapse_excgroups
+    raise exc
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\middleware\base.py", line 187, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\app\middleware.py", line 8, in dispatch
+    response = await call_next(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\middleware\base.py", line 163, in call_next
+    raise app_exc
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\middleware\base.py", line 149, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\middleware\exceptions.py", line 62, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\_exception_handler.py", line 62, in wrapped_app
+    raise exc
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\_exception_handler.py", line 51, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\routing.py", line 715, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\routing.py", line 735, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\routing.py", line 288, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\routing.py", line 76, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\_exception_handler.py", line 62, in wrapped_app
+    raise exc
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\_exception_handler.py", line 51, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\routing.py", line 73, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\fastapi\routing.py", line 301, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\fastapi\routing.py", line 214, in run_endpoint_function
+    return await run_in_threadpool(dependant.call, **values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\starlette\concurrency.py", line 39, in run_in_threadpool
+    return await anyio.to_thread.run_sync(func, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\anyio\to_thread.py", line 56, in run_sync
+    return await get_async_backend().run_sync_in_worker_thread(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 2485, in run_sync_in_worker_thread
+    return await future
+           ^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 976, in run
+    result = context.run(func, *args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\app\routers\orders.py", line 191, in open_order
+    db.commit()
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 2028, in commit
+    trans.commit(_to_root=True)
+  File "<string>", line 2, in commit
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\state_changes.py", line 139, in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 1313, in commit
+    self._prepare_impl()
+  File "<string>", line 2, in _prepare_impl
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\state_changes.py", line 139, in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 1288, in _prepare_impl
+    self.session.flush()
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 4352, in flush
+    self._flush(objects)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 4487, in _flush
+    with util.safe_reraise():
+         ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\util\langhelpers.py", line 146, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 4448, in _flush
+    flush_context.execute()
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\unitofwork.py", line 466, in execute
+    rec.execute(self)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\unitofwork.py", line 642, in execute
+    util.preloaded.orm_persistence.save_obj(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\persistence.py", line 93, in save_obj
+    _emit_insert_statements(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\persistence.py", line 1233, in _emit_insert_statements
+    result = connection.execute(
+             ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1418, in execute
+    return meth(
+           ^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\sql\elements.py", line 515, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1640, in _execute_clauseelement
+    ret = self._execute_context(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 2355, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\default.py", line 941, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\psycopg\cursor.py", line 97, in execute
+    raise ex.with_traceback(None)
+sqlalchemy.exc.ProgrammingError: (psycopg.errors.DatatypeMismatch) column "order_no" is of type integer but expression is of type character varying
+LINE 1: ...ed_at, version) VALUES ($1::VARCHAR, $2::VARCHAR, $3::VARCHA...
+                                                             ^
+HINT:  You will need to rewrite or cast the expression.
+[SQL: INSERT INTO "order" (tenant_id, branch_id, order_no, channel, provider, status, table_id, customer_id, opened_by_user_id, closed_by_user_id, pax, source_device_id, note, opened_at, closed_at, id, created_at, updated_at, deleted_at, version) VALUES (%(tenant_id)s::VARCHAR, %(branch_id)s::VARCHAR, %(order_no)s::VARCHAR, %(channel)s, %(provider)s, %(status)s, %(table_id)s::VARCHAR, %(customer_id)s::VARCHAR, %(opened_by_user_id)s::VARCHAR, %(closed_by_user_id)s::VARCHAR, %(pax)s::INTEGER, %(source_device_id)s::VARCHAR, %(note)s::VARCHAR, %(opened_at)s::TIMESTAMP WITHOUT TIME ZONE, %(closed_at)s::TIMESTAMP WITHOUT TIME ZONE, %(id)s::VARCHAR, %(created_at)s::TIMESTAMP WITH TIME ZONE, %(updated_at)s::TIMESTAMP WITH TIME ZONE, %(deleted_at)s::TIMESTAMP WITH TIME ZONE, %(version)s::INTEGER)]
+[parameters: {'tenant_id': '3b191f1f-cb1e-47e5-b999-08f5868d1fcb', 'branch_id': '72bec2ba-6f6a-42db-afe5-7e861f6caacf', 'order_no': 'ORD-1765042731', 'channel': 'DINE_IN', 'provider': None, 'status': 'OPEN', 'table_id': None, 'customer_id': None, 'opened_by_user_id': '86f8046f-744d-49fa-995c-58dcafcd729f', 'closed_by_user_id': None, 'pax': 2, 'source_device_id': None, 'note': None, 'opened_at': datetime.datetime(2025, 12, 6, 17, 38, 51, 143020, tzinfo=datetime.timezone.utc), 'closed_at': None, 'id': '21a3d99f-9ece-41d1-97cb-fd7b271b3e8b', 'created_at': datetime.datetime(2025, 12, 6, 17, 38, 51, 144530, tzinfo=datetime.timezone.utc), 'updated_at': datetime.datetime(2025, 12, 6, 17, 38, 51, 144530, tzinfo=datetime.timezone.utc), 'deleted_at': None, 'version': 1}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
