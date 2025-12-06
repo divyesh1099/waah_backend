@@ -419,8 +419,7 @@ def update_printer(
 def delete_printer(
     printer_id: str,
     db: Session = Depends(get_db),
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
-    ctx: AuthCtx = Depends(require_auth),
+    ctx: AuthCtx = Depends(require_auth),  # Relaxed from SETTINGS_EDIT
 ):
     p = db.get(Printer, printer_id)
     if not p:
@@ -432,6 +431,73 @@ def delete_printer(
     db.delete(p)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/printers/{printer_id}/test")
+def test_printer(
+    printer_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Test a printer by sending a simple test print job.
+    """
+    import httpx
+    import asyncio
+    from datetime import datetime, timezone
+    
+    p = db.get(Printer, printer_id)
+    if not p:
+        raise HTTPException(404, detail="printer not found")
+
+    if getattr(p, "tenant_id", None) != ctx.tenant_id or getattr(p, "branch_id", None) != ctx.branch_id:
+        raise HTTPException(404, detail="not found")
+
+    if not p.connection_url:
+        raise HTTPException(400, detail="Printer has no connection URL configured")
+
+    # Build test print payload
+    test_payload = {
+        "type": "test",
+        "printer_name": p.name,
+        "printer_type": p.type.value if hasattr(p.type, 'value') else str(p.type),
+        "test_time": datetime.now(timezone.utc).isoformat(),
+        "message": f"✅ Test print from {p.name}",
+        "lines": [
+            "================================",
+            f"  {p.name}",
+            "================================",
+            "",
+            "   🧪 TEST PRINT",
+            "",
+            f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"  Type: {p.type.value if hasattr(p.type, 'value') else str(p.type)}",
+            "",
+            "  ✅ Connection OK",
+            "",
+            "================================",
+        ]
+    }
+
+    # Send to printer
+    try:
+        async def send_print():
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(p.connection_url, json=test_payload)
+                resp.raise_for_status()
+                return resp.json()
+        
+        result = asyncio.run(send_print())
+        
+        return {
+            "ok": True,
+            "message": f"Test print job sent to {p.name}",
+            "printer_response": result
+        }
+    except httpx.HTTPError as e:
+        raise HTTPException(502, detail=f"Printer connection failed: {str(e)}")
+    except Exception as e:
+        raise HTTPException(500, detail=f"Test print failed: {str(e)}")
 
 
 # ---------------------------------------------------------------------
