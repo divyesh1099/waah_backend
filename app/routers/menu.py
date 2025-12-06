@@ -326,31 +326,39 @@ def list_items(
     Returns a list of menu items for POS.
     Shape matches what the Flutter MenuItem.fromJson() expects.
     """
-    # tenant isolation
-    if tenant_id is not None and tenant_id != ctx.tenant_id:
-        # pretend nothing found if trying to peek at another tenant
-        return []
+    import sys
+    import traceback
+    try:
+        # tenant isolation
+        if tenant_id is not None and tenant_id != ctx.tenant_id:
+            # pretend nothing found if trying to peek at another tenant
+            return []
 
-    # base query
-    q = (
-        db.query(MenuItem)
-        .join(MenuCategory, MenuCategory.id == MenuItem.category_id)
-        .filter(MenuItem.deleted_at.is_(None))
-        .filter(MenuItem.tenant_id == ctx.tenant_id)
-    )
+        # base query
+        q = (
+            db.query(MenuItem)
+            .join(MenuCategory, MenuCategory.id == MenuItem.category_id)
+            .filter(MenuItem.deleted_at.is_(None))
+            .filter(MenuItem.tenant_id == ctx.tenant_id)
+        )
 
-    # enforce branch via category.branch_id
-    if ctx.branch_id or (branch_id or "").strip():
-        eff_branch = _effective_branch_id(db, ctx, branch_id)
-        q = q.filter(MenuCategory.branch_id == eff_branch)
+        # enforce branch via category.branch_id
+        if ctx.branch_id or (branch_id or "").strip():
+            eff_branch = _effective_branch_id(db, ctx, branch_id)
+            q = q.filter(MenuCategory.branch_id == eff_branch)
 
-    # filter by category if provided
-    if category_id:
-        _ensure_category_access(db, category_id, ctx)
-        q = q.filter(MenuItem.category_id == category_id)
+        # filter by category if provided
+        if category_id:
+            _ensure_category_access(db, category_id, ctx)
+            q = q.filter(MenuItem.category_id == category_id)
 
-    rows: List[MenuItem] = q.all()
-    return [_item_payload(m) for m in rows]
+        rows: List[MenuItem] = q.all()
+        return [_item_payload(m) for m in rows]
+    except Exception as e:
+        print("CRASH IN LIST_ITEMS (FULL):", file=sys.stdout)
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        raise e
 
 
 @router.post("/items", response_model=MenuItemOut)

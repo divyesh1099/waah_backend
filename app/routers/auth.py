@@ -33,60 +33,78 @@ def _s(v):
     return "" if v is None else str(v)
 
 
+
+from pydantic import BaseModel
+class LoginRequest(BaseModel):
+    mobile: str | None = None
+    username: str | None = None
+    password: str | None = None
+    pin: str | None = None
+
 @router.post("/login", response_model=Token)
 def login(
-    mobile: str | None = None,
-    username: str | None = None,
-    password: str | None = None,
-    pin: str | None = None,
+    creds: LoginRequest,
     db: Session = Depends(get_db),
 ):
+    mobile = creds.mobile
+    username = creds.username
+    password = creds.password
+    pin = creds.pin
     """
     Auth by either:
     - mobile + password/pin
     - username + password/pin
     """
-    if not mobile and not username:
-        raise HTTPException(status_code=400, detail="Either mobile or username is required")
+    import sys
+    import traceback
+    try:
+        # Auth by either...
+        if not mobile and not username:
+            raise HTTPException(status_code=400, detail="Either mobile or username is required")
 
-    user = None
-    if username:
-        user = db.query(User).filter(User.username == username).first()
-    
-    if not user and mobile:
-        user = db.query(User).filter(User.mobile == mobile).first()
+        user = None
+        if username:
+            user = db.query(User).filter(User.username == username).first()
+        
+        if not user and mobile:
+            user = db.query(User).filter(User.mobile == mobile).first()
 
-    if not user or not bool(user.active):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        if not user or not bool(user.active):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    ok = False
-    if password:
-        ok = verify_pw(user.pass_hash, password)
-    if not ok and pin and user.pin_hash:
-        ok = verify_pw(user.pin_hash, pin)
-    if not ok:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        ok = False
+        if password:
+            ok = verify_pw(user.pass_hash, password)
+        if not ok and pin and user.pin_hash:
+            ok = verify_pw(user.pin_hash, pin)
+        if not ok:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # Compute a sensible default branch for user's tenant
-    from app.models.core import Branch
-    default_branch = (
-        db.query(Branch)
-        .filter(Branch.tenant_id == user.tenant_id)
-        .order_by(Branch.id.asc())
-        .first()
-    )
-    default_branch_id = default_branch.id if default_branch else None
+        # Compute a sensible default branch for user's tenant
+        from app.models.core import Branch
+        default_branch = (
+            db.query(Branch)
+            .filter(Branch.tenant_id == user.tenant_id)
+            .order_by(Branch.id.asc())
+            .first()
+        )
+        default_branch_id = default_branch.id if default_branch else None
 
-    # Emit both long/short claim names for compatibility (tenant_id/tid, branch_id/bid)
-    claims = {
-        "sub": _s(user.id),
-        "tenant_id": _s(user.tenant_id) or None,
-        "tid": _s(user.tenant_id) or None,
-        "branch_id": _s(default_branch_id) or None,
-        "bid": _s(default_branch_id) or None,
-    }
-    token = create_token(claims)
-    return Token(access_token=token)
+        # Emit both long/short claim names for compatibility (tenant_id/tid, branch_id/bid)
+        claims = {
+            "sub": _s(user.id),
+            "tenant_id": _s(user.tenant_id) or None,
+            "tid": _s(user.tenant_id) or None,
+            "branch_id": _s(default_branch_id) or None,
+            "bid": _s(default_branch_id) or None,
+        }
+        token = create_token(claims)
+        return Token(access_token=token)
+    except Exception as e:
+        with open("crash.log", "w") as f:
+            print("CRASH IN LOGIN:", file=f)
+            traceback.print_exc(file=f)
+        raise e
 
 
 @router.get("/me")

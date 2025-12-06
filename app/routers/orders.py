@@ -314,30 +314,6 @@ def add_item(order_id: str, body: OrderItemIn, db: Session = Depends(get_db), ct
             )
         )
 
-    # auto-KOT per station
-    if mitem.kitchen_station_id:
-        station_ticket = (
-            db.query(KitchenTicket)
-            .filter(
-                KitchenTicket.order_id == order_id,
-                KitchenTicket.target_station == mitem.kitchen_station_id,
-            )
-            .first()
-        )
-        if not station_ticket:
-            station_ticket = KitchenTicket(
-                order_id=order_id,
-                ticket_no=int(datetime.now().timestamp()),
-                target_station=mitem.kitchen_station_id,
-            )
-            db.add(station_ticket)
-            db.flush()
-        db.add(
-            KitchenTicketItem(
-                ticket_id=station_ticket.id, order_item_id=line.id, qty=body.qty
-            )
-        )
-
     db.commit()
     return {"id": line.id}
 
@@ -570,4 +546,136 @@ def get_order(order_id: str, db: Session = Depends(get_db), ctx: AuthCtx = Depen
             "due": due,
             "total_due": due,  # test expects this alias
         },
+    }
+
+
+@router.post("/{order_id}/kot")
+async def fire_kot_for_order(
+    order_id: str,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Fire KOT: Batch creates Kitchen Tickets for all 'unsent' items in this order.
+    
+    1. Finds OrderItems not yet linked to any KitchenTicketItem.
+    2. Groups them by KitchenStation.
+    3. Creates one KitchenTicket per station.
+    4. Updates Order status OPEN -> KITCHEN.
+    5. Returns list of created tickets.
+    """
+    o = _ensure_order_access(db, order_id, ctx)
+
+    # 1. Find unsent items
+    #    (Items that are NOT present in KitchenTicketItem)
+    #    We can do a LEFT OUTER JOIN or NOT IN subquery.
+    
+    # subquery: all order_item_ids in KOTs
+    sent_item_ids = (
+        db.query(KitchenTicketItem.order_item_id)
+        .join(KitchenTicket, KitchenTicket.id == KitchenTicketItem.ticket_id)
+        .filter(KitchenTicket.order_id == order_id) # Optimization: limit to this order's tickets
+    )
+    
+    unsent_q = (
+        db.query(OrderItem, MenuItem.kitchen_station_id)
+        .join(MenuItem, MenuItem.id == OrderItem.item_id)
+        .filter(OrderItem.order_id == order_id)
+        .filter(OrderItem.id.notin_(sent_item_ids))
+    )
+    
+    unsent_rows = unsent_q.all()
+    
+    if not unsent_rows:
+        return {"message": "No new items to send to kitchen", "tickets": []}
+
+    # 2. Group by Station
+    by_station = {}
+    for line, station_id in unsent_rows:
+        # If no station assigned to item, maybe put in a 'General' or skip? 
+        # For now, treat None as a "No Station" group
+        sid = station_id or "NONE"
+        by_station.setdefault(sid, []).append(line)
+
+    created_tickets = []
+    
+    now = datetime.now(timezone.utc)
+    
+    # 3. Create Tickets
+    for sid, lines in by_station.items():
+        # Determine ticket number (branch scoped)
+        # Re-using logic: max(ticket_no) for this branch
+        branch_id = getattr(o, "branch_id", None) or ctx.branch_id
+        
+        next_no = 1
+        if branch_id:
+             max_no = (
+                db.query(func.max(KitchenTicket.ticket_no))
+                .select_from(KitchenTicket)
+                .join(Order, Order.id == KitchenTicket.order_id)
+                .filter(Order.branch_id == branch_id)
+                .scalar()
+            )
+             if max_no: next_no = max_no + 1
+
+        t = KitchenTicket(
+            order_id=order_id,
+            ticket_no=next_no,
+            target_station=(None if sid == "NONE" else sid),
+            status=getattr(KOTStatus, "NEW", "NEW"), # Safety if Enum not imported as class, though it is
+            printed_at=now,
+        )
+        db.add(t)
+        db.flush() # get ID
+        
+        # Add items
+        for line in lines:
+            # Gather modifiers note? 
+            # We need to query modifiers for this line to put in 'note' field for KOT Item? 
+            # Ideally yes, matching `create_ticket` logic.
+            # For speed, we will do a quick lookup or just leave it empty for this V1 if complex.
+            # Let's try to get modifiers.
+            
+            # Simple Modifiers fetch
+            mods = (
+                db.query(Modifier.name, OrderItemModifier.qty)
+                .join(OrderItemModifier, OrderItemModifier.modifier_id == Modifier.id)
+                .filter(OrderItemModifier.order_item_id == line.id)
+                .all()
+            )
+            note_parts = []
+            for mname, mqty in mods:
+                qstr = f" x{mqty}" if mqty != 1 else ""
+                note_parts.append(f"{mname}{qstr}")
+            
+            kt_item = KitchenTicketItem(
+                ticket_id=t.id,
+                order_item_id=line.id,
+                qty=line.qty,
+                note=", ".join(note_parts) if note_parts else None
+            )
+            db.add(kt_item)
+            
+        created_tickets.append(t)
+
+    # 4. Update Order Status
+    # Only if OPEN -> KITCHEN
+    if o.status == OrderStatus.OPEN:
+        o.status = OrderStatus.KITCHEN
+        db.add(AuditLog(
+             actor_user_id=ctx.user_id,
+             entity="Order",
+             entity_id=order_id,
+             action="STATUS_CHANGE",
+             reason="Auto-update on Fire KOT",
+             before="OPEN",
+             after="KITCHEN",
+        ))
+
+    db.commit()
+    
+    # Return simple summary (Frontend can refresh KOT list)
+    return {
+        "message": f"Created {len(created_tickets)} KOT(s)",
+        "tickets": [{"id": t.id, "ticket_no": t.ticket_no, "station": t.target_station} for t in created_tickets]
     }

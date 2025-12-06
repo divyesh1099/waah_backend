@@ -1,0 +1,82 @@
+Error: (psycopg.errors.UndefinedColumn) column "image_url" of relation "item_variant" does not exist
+LINE 1: ...ant (item_id, label, mrp, base_price, is_default, image_url,...
+                                                             ^
+[SQL: INSERT INTO item_variant (item_id, label, mrp, base_price, is_default, image_url, id, created_at, updated_at, deleted_at, version) VALUES (%(item_id)s::VARCHAR, %(label)s::VARCHAR, %(mrp)s, %(base_price)s, %(is_default)s, %(image_url)s::VARCHAR, %(id)s::VARCHAR, %(created_at)s::TIMESTAMP WITH TIME ZONE, %(updated_at)s::TIMESTAMP WITH TIME ZONE, %(deleted_at)s::TIMESTAMP WITH TIME ZONE, %(version)s::INTEGER)]
+[parameters: {'item_id': '62f43f84-5e07-4b83-b048-c8361a3ab0e0', 'label': 'Regular', 'mrp': None, 'base_price': 150, 'is_default': True, 'image_url': None, 'id': 'c6d6f2f6-27df-4a84-b6be-238b2d47b9ee', 'created_at': datetime.datetime(2025, 12, 6, 20, 20, 51, 871470, tzinfo=datetime.timezone.utc), 'updated_at': datetime.datetime(2025, 12, 6, 20, 20, 51, 871470, tzinfo=datetime.timezone.utc), 'deleted_at': None, 'version': 1}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+Traceback (most recent call last):
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\default.py", line 941, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\psycopg\cursor.py", line 97, in execute
+    raise ex.with_traceback(None)
+psycopg.errors.UndefinedColumn: column "image_url" of relation "item_variant" does not exist
+LINE 1: ...ant (item_id, label, mrp, base_price, is_default, image_url,...
+                                                             ^
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\verify_kot_fire.py", line 85, in setup_user
+    db.commit()
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 2028, in commit
+    trans.commit(_to_root=True)
+  File "<string>", line 2, in commit
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\state_changes.py", line 139, in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 1313, in commit
+    self._prepare_impl()
+  File "<string>", line 2, in _prepare_impl
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\state_changes.py", line 139, in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 1288, in _prepare_impl
+    self.session.flush()
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 4352, in flush
+    self._flush(objects)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 4487, in _flush
+    with util.safe_reraise():
+         ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\util\langhelpers.py", line 146, in __exit__
+    raise exc_value.with_traceback(exc_tb)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\session.py", line 4448, in _flush
+    flush_context.execute()
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\unitofwork.py", line 466, in execute
+    rec.execute(self)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\unitofwork.py", line 642, in execute
+    util.preloaded.orm_persistence.save_obj(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\persistence.py", line 93, in save_obj
+    _emit_insert_statements(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\orm\persistence.py", line 1233, in _emit_insert_statements
+    result = connection.execute(
+             ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1418, in execute
+    return meth(
+           ^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\sql\elements.py", line 515, in _execute_on_connection
+    return connection._execute_clauseelement(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1640, in _execute_clauseelement
+    ret = self._execute_context(
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1846, in _execute_context
+    return self._exec_single_context(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1986, in _exec_single_context
+    self._handle_dbapi_exception(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 2355, in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\base.py", line 1967, in _exec_single_context
+    self.dialect.do_execute(
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\sqlalchemy\engine\default.py", line 941, in do_execute
+    cursor.execute(statement, parameters)
+  File "C:\Users\Admin\Desktop\Divyesh\Waah\backend\.venv\Lib\site-packages\psycopg\cursor.py", line 97, in execute
+    raise ex.with_traceback(None)
+sqlalchemy.exc.ProgrammingError: (psycopg.errors.UndefinedColumn) column "image_url" of relation "item_variant" does not exist
+LINE 1: ...ant (item_id, label, mrp, base_price, is_default, image_url,...
+                                                             ^
+[SQL: INSERT INTO item_variant (item_id, label, mrp, base_price, is_default, image_url, id, created_at, updated_at, deleted_at, version) VALUES (%(item_id)s::VARCHAR, %(label)s::VARCHAR, %(mrp)s, %(base_price)s, %(is_default)s, %(image_url)s::VARCHAR, %(id)s::VARCHAR, %(created_at)s::TIMESTAMP WITH TIME ZONE, %(updated_at)s::TIMESTAMP WITH TIME ZONE, %(deleted_at)s::TIMESTAMP WITH TIME ZONE, %(version)s::INTEGER)]
+[parameters: {'item_id': '62f43f84-5e07-4b83-b048-c8361a3ab0e0', 'label': 'Regular', 'mrp': None, 'base_price': 150, 'is_default': True, 'image_url': None, 'id': 'c6d6f2f6-27df-4a84-b6be-238b2d47b9ee', 'created_at': datetime.datetime(2025, 12, 6, 20, 20, 51, 871470, tzinfo=datetime.timezone.utc), 'updated_at': datetime.datetime(2025, 12, 6, 20, 20, 51, 871470, tzinfo=datetime.timezone.utc), 'deleted_at': None, 'version': 1}]
+(Background on this error at: https://sqlalche.me/e/20/f405)

@@ -176,7 +176,7 @@ class MenuItem(Base, IdMixin, TSMMixin):
     stock_out: Mapped[bool] = mapped_column(Boolean, default=False)
     tax_inclusive: Mapped[bool] = mapped_column(Boolean, default=True)
     gst_rate: Mapped[float] = mapped_column(Numeric(5, 2), default=5.00)
-    kitchen_station_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("kitchen_station.id"))
+    kitchen_station_id: Mapped[str | None] = mapped_column(String(36))
     image_url: Mapped[str | None] = mapped_column(String(400))
 
 class ItemVariant(Base, IdMixin, TSMMixin):
