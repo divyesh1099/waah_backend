@@ -353,6 +353,15 @@ def add_printer(
     db.commit()
     db.refresh(p)
 
+    # CRITICAL: Unset other defaults of same type before setting this as default
+    if getattr(p, "is_default", False):
+        db.query(Printer).filter(
+            Printer.tenant_id == p.tenant_id,
+            Printer.branch_id == p.branch_id,
+            Printer.type == p.type,
+            Printer.id != p.id,
+        ).update({"is_default": False})
+    
     # Auto-link as billing printer if default or not set yet
     if p.type == PrinterType.BILLING:
         rs = (
@@ -395,6 +404,15 @@ def update_printer(
             else:
                 setattr(p, k, v)
 
+    # CRITICAL: Unset other defaults of same type before setting this as default
+    if getattr(p, "is_default", False):
+        db.query(Printer).filter(
+            Printer.tenant_id == p.tenant_id,
+            Printer.branch_id == p.branch_id,
+            Printer.type == p.type,
+            Printer.id != p.id,
+        ).update({"is_default": False})
+    
     db.commit()
     db.refresh(p)
 
