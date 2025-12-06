@@ -528,12 +528,42 @@ def get_order(order_id: str, db: Session = Depends(get_db), ctx: AuthCtx = Depen
     total = float(totals.get("total", 0.0))
     due = _money(total - paid)
 
+    # NEW: Fetch items with details
+    items_query = (
+        db.query(OrderItem, MenuItem.name, ItemVariant.label)
+        .join(MenuItem, OrderItem.item_id == MenuItem.id)
+        .outerjoin(ItemVariant, OrderItem.variant_id == ItemVariant.id)
+        .filter(OrderItem.order_id == order_id)
+        .all()
+    )
+
+    parsed_items = []
+    for row in items_query:
+        line, item_name, variant_label = row
+        parsed_items.append({
+            "id": line.id,
+            "order_id": line.order_id,
+            "item_id": line.item_id,
+            "name": item_name,
+            "variant_id": line.variant_id,
+            "variant_label": variant_label,
+            "qty": float(line.qty),
+            "unit_price": float(line.unit_price),
+            "line_discount": float(line.line_discount),
+            "gst_rate": float(line.gst_rate),
+            "cgst": float(line.cgst),
+            "sgst": float(line.sgst),
+            "igst": float(line.igst),
+            "taxable_value": float(line.taxable_value),
+        })
+
     return {
         "id": o.id,
         "status": getattr(o.status, "value", str(o.status)),
         "tenant_id": getattr(o, "tenant_id", None),
         "branch_id": getattr(o, "branch_id", None),
         "order_no": getattr(o, "order_no", None),
+        "items": parsed_items, # NEW
         "totals": {
             **totals,
             "paid": _money(paid),

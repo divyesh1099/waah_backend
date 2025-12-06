@@ -268,6 +268,7 @@ def list_tickets(
     start_dt: Optional[datetime] = None,
     end_dt: Optional[datetime] = None,
     branch_id: Optional[str] = None,
+    order_id: Optional[str] = None, # NEW
     db: Session = Depends(get_db),
     ctx: AuthCtx = Depends(require_auth),
 ):
@@ -279,6 +280,7 @@ def list_tickets(
       - status: "NEW", "IN_PROGRESS", "READY" (optional)
       - start_dt: ISO 8601 timestamp (optional)
       - end_dt: ISO 8601 timestamp (optional)
+      - order_id: Filter by specific order (optional)
 
     Response is shaped for the Flutter KOT v3.2 page (camelCase + lines + timestamps).
     """
@@ -305,6 +307,10 @@ def list_tickets(
         q = q.filter(Order.opened_at >= start_dt)
     if end_dt:
         q = q.filter(Order.opened_at <= end_dt)
+        
+    # NEW: optional filter by order_id
+    if order_id:
+        q = q.filter(KitchenTicket.order_id == order_id)
 
     q = q.order_by(KitchenTicket.ticket_no.desc())
     tickets = q.all()
