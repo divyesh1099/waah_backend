@@ -63,7 +63,15 @@ def check_and_fix_schema(engine: Engine):
                 conn.execute(text('ALTER TABLE "order" ALTER COLUMN order_no TYPE VARCHAR(60) USING order_no::VARCHAR'))
                 conn.commit()
         except Exception as e:
-            logger.error(f"Failed to fix order.order_no type: {e}")
+             logger.error(f"Failed to fix order.order_no type: {e}")
+             conn.rollback()
+
+        # 5. stock_move.branch_id (needed for per-branch inventory)
+        try:
+            conn.execute(text('ALTER TABLE "stock_move" ADD COLUMN IF NOT EXISTS branch_id VARCHAR(36)'))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to check/add stock_move.branch_id: {e}")
             conn.rollback()
              
     logger.info("Schema check complete.")
