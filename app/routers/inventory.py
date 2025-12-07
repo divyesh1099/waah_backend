@@ -1,10 +1,13 @@
 # app/routers/inventory.py
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import date
 from decimal import Decimal
 from typing import List
+import csv
+from io import StringIO
 
 from app.db import get_db
 from app.deps import AuthCtx, require_auth, require_perm
@@ -18,6 +21,8 @@ from app.models.core import (
     ReportStockSnapshot,
     MenuItem,
     MenuCategory,
+    CashMovement,
+    Shift,
 )
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -68,6 +73,13 @@ def _ensure_item_access(db: Session, item_id: str, ctx: AuthCtx) -> MenuItem:
     if (not cat) or cat.tenant_id != ctx.tenant_id or (ctx.branch_id and cat.branch_id != ctx.branch_id):
         raise HTTPException(status_code=404, detail="item not found")
     return it
+
+
+# ---------- CSV import/export helpers ----------
+
+def _parse_csv_rows(csv_text: str) -> list[dict[str, str]]:
+    reader = csv.DictReader(StringIO(csv_text.strip()))
+    return [dict({k.strip(): (v or "").strip() for k, v in row.items()}) for row in reader]
 
 
 # ---------- INGREDIENTS ----------
@@ -345,3 +357,141 @@ def stock_report(
             "closing": float(snap.closing_qty or 0),
         })
     return out
+
+
+# ---------- CSV IMPORT / EXPORT ----------
+
+@router.post("/ingredients/import_csv")
+def import_ingredients_csv(
+    csv_text: str,
+    branch_id: str | None = None,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Import Ingredients from CSV.
+    Expected headers: name,uom,min_level
+    branch_id is taken from context or query param; tenant is always ctx.tenant_id.
+    """
+    rows = _parse_csv_rows(csv_text)
+    created = 0
+    updated = 0
+    eff_branch = ctx.branch_id or (branch_id or "").strip()
+
+    for row in rows:
+        name = row.get("name") or ""
+        uom = row.get("uom") or ""
+        if not name or not uom:
+            continue
+        min_level = _to_float(row.get("min_level"))
+        existing = (
+            db.query(Ingredient)
+            .filter(Ingredient.tenant_id == ctx.tenant_id, Ingredient.name == name)
+            .first()
+        )
+        if existing:
+            existing.uom = uom
+            if hasattr(existing, "min_level"):
+                existing.min_level = min_level
+            updated += 1
+        else:
+            db.add(
+                Ingredient(
+                    tenant_id=ctx.tenant_id,
+                    name=name,
+                    uom=uom,
+                    min_level=min_level,
+                    image_url=None,
+                )
+            )
+            created += 1
+
+    db.commit()
+    return {"created": created, "updated": updated}
+
+
+@router.get("/ingredients/export_csv", response_class=PlainTextResponse)
+def export_ingredients_csv(
+    branch_id: str | None = None,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Export ingredients for the tenant as CSV.
+    """
+    rows = db.query(Ingredient).filter(Ingredient.tenant_id == ctx.tenant_id).order_by(Ingredient.name.asc()).all()
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["name", "uom", "min_level"])
+    for ing in rows:
+        writer.writerow([ing.name, ing.uom, _to_float(getattr(ing, "min_level", 0))])
+    return PlainTextResponse(output.getvalue(), media_type="text/csv")
+
+
+@router.post("/cash/import_csv")
+def import_cash_movements_csv(
+    csv_text: str,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Import CashMovement rows from CSV.
+    Expected headers: shift_id,kind,amount,reason
+    shift_id must exist and belong to caller's branch/tenant.
+    """
+    rows = _parse_csv_rows(csv_text)
+    created = 0
+
+    for row in rows:
+        shift_id = (row.get("shift_id") or "").strip()
+        kind = (row.get("kind") or "").strip()
+        amount = _to_float(row.get("amount"))
+        reason = row.get("reason") or None
+
+        if not shift_id or not kind or amount == 0:
+            continue
+
+        shift = db.get(Shift, shift_id)
+        if not shift or (ctx.branch_id and shift.branch_id != ctx.branch_id):
+            continue
+
+        db.add(
+            CashMovement(
+                shift_id=shift_id,
+                kind=kind,
+                amount=amount,
+                reason=reason,
+            )
+        )
+        created += 1
+
+    db.commit()
+    return {"created": created}
+
+
+@router.get("/cash/export_csv", response_class=PlainTextResponse)
+def export_cash_movements_csv(
+    shift_id: str | None = None,
+    branch_id: str | None = None,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Export cash movements as CSV for a shift or branch.
+    """
+    q = db.query(CashMovement, Shift.branch_id).join(Shift, CashMovement.shift_id == Shift.id)
+    eff_branch = ctx.branch_id or (branch_id or "").strip()
+    if eff_branch:
+        q = q.filter(Shift.branch_id == eff_branch)
+    if shift_id:
+        q = q.filter(CashMovement.shift_id == shift_id)
+
+    rows = q.order_by(CashMovement.created_at.desc()).all()
+
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["shift_id", "branch_id", "kind", "amount", "reason", "created_at"])
+    for cm, br_id in rows:
+        writer.writerow([cm.shift_id, br_id, cm.kind, _to_float(cm.amount), cm.reason or "", cm.created_at])
+
+    return PlainTextResponse(output.getvalue(), media_type="text/csv")
