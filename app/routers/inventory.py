@@ -303,7 +303,7 @@ def low_stock(
     res = []
     for ing in db.query(Ingredient).filter(Ingredient.tenant_id == ctx.tenant_id).all():
         qty = levels.get(ing.id, 0.0)
-        min_level = float(ing.min_level or 0)
+        min_level = _to_float(getattr(ing, "min_level", 0))  # Safe access
         if qty <= min_level:
             res.append({
                 "ingredient_id": ing.id,
