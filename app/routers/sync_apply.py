@@ -198,21 +198,34 @@ def _apply_kot(
     # 3. Generate a new, sequential ticket number for this branch
     next_ticket_no = _get_next_kot_number(db, branch_id)
 
-    # 4. Create the KitchenTicket
-    kot = KitchenTicket(
-        id=(op.get("entity_id") or str(uuid4())),
-        order_id=order_id,
-        ticket_no=next_ticket_no,  # Use the REAL, sequential ticket number
-        target_station=payload.get("target_station"),
-        status=_enum(KOTStatus, payload.get("status"), KOTStatus.NEW),
-        printed_at=_parse_dt(payload.get("printed_at")) or datetime.now(timezone.utc),
-    )
-    db.add(kot)
-    db.flush()  # Get kot.id
+    # 4. Create/Update the KitchenTicket (idempotent by id)
+    kot_id = payload.get("id") or op.get("entity_id") or str(uuid4())
+    kot = db.get(KitchenTicket, kot_id)
+    if kot:
+        kot.order_id = order_id
+        kot.ticket_no = kot.ticket_no or next_ticket_no
+        kot.target_station = payload.get("target_station", kot.target_station)
+        kot.status = _enum(KOTStatus, payload.get("status"), kot.status or KOTStatus.NEW)
+        kot.printed_at = _parse_dt(payload.get("printed_at")) or kot.printed_at or datetime.now(timezone.utc)
+        kot.reprint_count = payload.get("reprint_count", getattr(kot, "reprint_count", 0))
+    else:
+        kot = KitchenTicket(
+            id=kot_id,
+            order_id=order_id,
+            ticket_no=next_ticket_no,  # Use the REAL, sequential ticket number
+            target_station=payload.get("target_station"),
+            status=_enum(KOTStatus, payload.get("status"), KOTStatus.NEW),
+            printed_at=_parse_dt(payload.get("printed_at")) or datetime.now(timezone.utc),
+            reprint_count=payload.get("reprint_count", 0),
+        )
+        db.add(kot)
+        db.flush()  # Get kot.id
 
     # 5. Create KitchenTicketItems
     kot_lines = payload.get("lines")
     if isinstance(kot_lines, list):
+        # Replace items for idempotency
+        db.query(KitchenTicketItem).filter(KitchenTicketItem.ticket_id == kot.id).delete(synchronize_session=False)
         for line_payload in kot_lines:
             if not isinstance(line_payload, dict):
                 continue
@@ -290,84 +303,7 @@ def apply_ops(ops: Iterable[dict], *, db: Session, user_id: str, device_id: str 
             print(f"Failed to apply KOT op: {e}") # Log error
             pass
 
-        payload   = op.get("payload") or {}
-        tenant_id = payload.get("tenant_id")
-        branch_id = payload.get("branch_id")
-        order_no  = payload.get("order_no")
-        if not (tenant_id and branch_id and order_no):
-            continue
-
-        channel   = _enum(OrderChannel, payload.get("channel"), OrderChannel.TAKEAWAY)
-        status    = _enum(OrderStatus,  payload.get("status"),  OrderStatus.OPEN)
-        opened_at = _parse_dt(payload.get("opened_at")) or datetime.now(timezone.utc)
-        pax       = payload.get("pax")
-        note      = payload.get("note")
-
-        # idempotent upsert by (branch_id, order_no)
-        row = (db.query(Order)
-                 .filter(Order.branch_id == branch_id, Order.order_no == order_no)
-                 .first())
-
-        if row:
-            row.status = status
-            row.channel = channel
-            row.pax = pax if pax is not None else row.pax
-            row.note = note if note is not None else row.note
-            row.source_device_id = device_id or row.source_device_id
-            if not row.opened_at:
-                row.opened_at = opened_at
-        else:
-            new_id = (payload.get("id") or op.get("entity_id") or str(uuid4()))
-            row = Order(
-                id=new_id,
-                tenant_id=tenant_id,
-                branch_id=branch_id,
-                order_no=order_no,
-                channel=channel,
-                status=status,
-                opened_by_user_id=user_id,
-                opened_at=opened_at,
-                source_device_id=device_id,
-                pax=pax,
-                note=note,
-            )
-            db.add(row)
-            db.flush()
-
-        # replace items if provided (keeps things deterministic)
-        items = payload.get("items")
-        if isinstance(items, list):
-            db.query(KitchenTicketItem).filter(
-                KitchenTicketItem.order_item_id.in_(
-                    db.query(OrderItem.id).filter(OrderItem.order_id == row.id)
-                )
-            ).delete(synchronize_session=False)
-            db.query(OrderItemModifier).filter(
-                OrderItemModifier.order_item_id.in_(
-                    db.query(OrderItem.id).filter(OrderItem.order_id == row.id)
-                )
-            ).delete(synchronize_session=False)
-            db.query(OrderItem).filter(OrderItem.order_id == row.id).delete(synchronize_session=False)
-            for it in items:
-                if not it:
-                    continue
-                db.add(OrderItem(
-                    id=str(uuid4()),
-                    order_id=row.id,
-                    item_id=it.get("item_id"),
-                    variant_id=it.get("variant_id"),
-                    parent_line_id=it.get("parent_line_id"),
-                    qty=it.get("qty", 1),
-                    unit_price=it.get("unit_price", 0.0),
-                    line_discount=it.get("line_discount", 0.0),
-                    gst_rate=it.get("gst_rate", 5.0),
-                    cgst=0, sgst=0, igst=0,
-                    taxable_value=round(float(it.get("qty", 1)) * float(it.get("unit_price", 0.0)), 2),
-                ))
-
-        applied += 1
-
-    return applied
+    return applied_count
 
 def _next_kot_number(db: Session, branch_id: str) -> int:
     # Per-branch monotonically increasing; simple & safe
