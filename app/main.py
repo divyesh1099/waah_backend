@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from app.middleware import RequestIdMiddleware
 from app.db import Base, engine
 from app.config import MEDIA_ROOT_PATH, MEDIA_URL_PREFIX
+from app.services.report_scheduler import start_report_scheduler
 
 # Routers
 from app.routers import (
@@ -38,6 +39,7 @@ from app.fix_schema import check_and_fix_schema
 def init_db():
     check_and_fix_schema(engine)
     Base.metadata.create_all(bind=engine)
+    start_report_scheduler()
 
 # Serve uploaded media
 app.mount(
