@@ -73,5 +73,13 @@ def check_and_fix_schema(engine: Engine):
         except Exception as e:
             logger.error(f"Failed to check/add stock_move.branch_id: {e}")
             conn.rollback()
+
+        # 6. purchase.branch_id
+        try:
+            conn.execute(text('ALTER TABLE "purchase" ADD COLUMN IF NOT EXISTS branch_id VARCHAR(36)'))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to check/add purchase.branch_id: {e}")
+            conn.rollback()
              
     logger.info("Schema check complete.")
