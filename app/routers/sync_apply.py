@@ -7,8 +7,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.models.core import (
-    KOTStatus, KitchenTicket, KitchenTicketItem,
-    Order, OrderItem, OrderChannel, OrderStatus
+    KOTStatus,
+    KitchenTicket,
+    KitchenTicketItem,
+    Order,
+    OrderChannel,
+    OrderItem,
+    OrderItemModifier,
+    OrderStatus,
 )
 
 def _parse_dt(val: Any) -> datetime | None:
@@ -97,8 +103,18 @@ def _apply_order(
 
     items = payload.get("items")
     if isinstance(items, list):
-        # Delete existing items only if new items are provided
-        db.query(OrderItem).filter(OrderItem.order_id == row.id).delete()
+        # Delete dependent rows (modifiers, KOT items) first, then replace items
+        db.query(KitchenTicketItem).filter(
+            KitchenTicketItem.order_item_id.in_(
+                db.query(OrderItem.id).filter(OrderItem.order_id == row.id)
+            )
+        ).delete(synchronize_session=False)
+        db.query(OrderItemModifier).filter(
+            OrderItemModifier.order_item_id.in_(
+                db.query(OrderItem.id).filter(OrderItem.order_id == row.id)
+            )
+        ).delete(synchronize_session=False)
+        db.query(OrderItem).filter(OrderItem.order_id == row.id).delete(synchronize_session=False)
         for it in items:
             if not isinstance(it, dict):
                 continue
@@ -321,7 +337,17 @@ def apply_ops(ops: Iterable[dict], *, db: Session, user_id: str, device_id: str 
         # replace items if provided (keeps things deterministic)
         items = payload.get("items")
         if isinstance(items, list):
-            db.query(OrderItem).filter(OrderItem.order_id == row.id).delete()
+            db.query(KitchenTicketItem).filter(
+                KitchenTicketItem.order_item_id.in_(
+                    db.query(OrderItem.id).filter(OrderItem.order_id == row.id)
+                )
+            ).delete(synchronize_session=False)
+            db.query(OrderItemModifier).filter(
+                OrderItemModifier.order_item_id.in_(
+                    db.query(OrderItem.id).filter(OrderItem.order_id == row.id)
+                )
+            ).delete(synchronize_session=False)
+            db.query(OrderItem).filter(OrderItem.order_id == row.id).delete(synchronize_session=False)
             for it in items:
                 if not it:
                     continue
