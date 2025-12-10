@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from uuid import UUID
 
 from app.schemas.common import Token
-from app.util.security import create_token, verify_pw
+from app.util.security import create_token, verify_pw, hash_pw
 from app.models.core import (
     User, Role, UserRole, RolePermission, Permission,
 )
@@ -40,6 +40,18 @@ class LoginRequest(BaseModel):
     username: str | None = None
     password: str | None = None
     pin: str | None = None
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class ChangePinRequest(BaseModel):
+    current_pin: str
+    new_pin: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 @router.post("/login", response_model=Token)
 def login(
@@ -160,3 +172,72 @@ def me(
         "roles": role_codes,
         "permissions": sorted(list(perm_codes)),
     }
+
+
+@router.post("/change-password")
+def change_password(
+    body: ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Authenticated password change for the current user.
+    Validates current password, updates hash, and returns a fresh JWT.
+    """
+    u: User | None = db.get(User, ctx.user_id)
+    if not u or not bool(u.active):
+        raise HTTPException(status_code=404, detail="user not found")
+
+    if not u.pass_hash or not verify_pw(u.pass_hash, body.current_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    if len(body.new_password) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+
+    u.pass_hash = hash_pw(body.new_password)
+    db.commit()
+
+    # Re-issue token with same claims as login
+    from app.models.core import Branch  # local import to avoid cycles
+    default_branch = (
+        db.query(Branch)
+        .filter(Branch.tenant_id == u.tenant_id)
+        .order_by(Branch.id.asc())
+        .first()
+    )
+    default_branch_id = default_branch.id if default_branch else None
+
+    claims = {
+        "sub": _s(u.id),
+        "tenant_id": _s(u.tenant_id) or None,
+        "tid": _s(u.tenant_id) or None,
+        "branch_id": _s(default_branch_id) or None,
+        "bid": _s(default_branch_id) or None,
+    }
+    token = create_token(claims)
+    return {"ok": True, "access_token": token}
+
+
+@router.post("/change-pin")
+def change_pin(
+    body: ChangePinRequest,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Authenticated PIN change for the current user.
+    Validates current PIN, updates hash.
+    """
+    u: User | None = db.get(User, ctx.user_id)
+    if not u or not bool(u.active):
+        raise HTTPException(status_code=404, detail="user not found")
+
+    if not u.pin_hash or not verify_pw(u.pin_hash, body.current_pin):
+        raise HTTPException(status_code=400, detail="Current PIN is incorrect")
+
+    if len(body.new_pin) < 4:
+        raise HTTPException(status_code=400, detail="New PIN must be at least 4 digits")
+
+    u.pin_hash = hash_pw(body.new_pin)
+    db.commit()
+    return {"ok": True}
