@@ -20,6 +20,7 @@ from app.schemas.menu import (
     MenuItemOut,
     VariantIn,
     VariantOut,
+    BulkMenuIn,
 )
 from app.models.core import (
     Branch,
@@ -796,6 +797,100 @@ def delete_item_image(
     it.image_url = None
     db.commit()
     return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
+# BULK INSERT
+# -----------------------------------------------------------------------------
+
+@router.post("/bulk")
+def bulk_insert_menu(
+    body: BulkMenuIn,
+    tenant_id: Optional[str] = None,
+    branch_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Bulk insert categories, items, and variants.
+    Transactional: if any part fails, changes are rolled back (by FastAPI/SQLAlchemy default behavior on exception).
+    """
+    # 1. Resolve branch
+    eff_branch = _effective_branch_id(db, ctx, branch_id)
+
+    # 2. Iterate and Insert
+    # We will just append new objects. No sophisticated dedup logic for now.
+    
+    import logging
+    logger = logging.getLogger("uvicorn.error")
+
+    created_cats = 0
+    created_items = 0
+    created_variants = 0
+
+    try:
+        for cat_data in body.categories:
+            # Create Category
+            new_cat = MenuCategory(
+                tenant_id=ctx.tenant_id,
+                branch_id=eff_branch,
+                name=cat_data.name,
+                position=cat_data.position
+            )
+            db.add(new_cat)
+            db.flush() # flush to get new_cat.id
+
+            created_cats += 1
+            
+            if cat_data.items:
+                for item_data in cat_data.items:
+                    # Create Item
+                    new_item = MenuItem(
+                        tenant_id=ctx.tenant_id,
+                        category_id=new_cat.id,
+                        name=item_data.name,
+                        description=item_data.description,
+                        sku=item_data.sku,
+                        hsn=item_data.hsn,
+                        is_active=item_data.is_active,
+                        stock_out=item_data.stock_out,
+                        tax_inclusive=item_data.tax_inclusive,
+                        gst_rate=item_data.gst_rate,
+                        kitchen_station_id=item_data.kitchen_station_id,
+                    )
+                    db.add(new_item)
+                    db.flush() # to get new_item.id
+
+                    created_items += 1
+
+                    if item_data.variants:
+                        for var_data in item_data.variants:
+                            # Create Variant
+                            new_var = ItemVariant(
+                                item_id=new_item.id,
+                                label=var_data.label,
+                                base_price=var_data.base_price,
+                                mrp=var_data.mrp,
+                                is_default=var_data.is_default
+                            )
+                            db.add(new_var)
+                            created_variants += 1
+        
+        db.commit()
+        return {
+            "ok": True, 
+            "message": f"Inserted {created_cats} categories, {created_items} items, {created_variants} variants.",
+            "counts": {
+                "categories": created_cats,
+                "items": created_items,
+                "variants": created_variants
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Bulk insert failed: {e}")
+        db.rollback() 
+        raise HTTPException(status_code=400, detail=f"Bulk insert failed: {str(e)}")
 
 
 @router.post("/variants/{variant_id}/image")

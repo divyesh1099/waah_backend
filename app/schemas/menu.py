@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional
+from typing import Optional, List
 
 class MenuCategoryIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="ignore")
@@ -64,5 +64,43 @@ class ItemModifierGroupIn(BaseModel):
     item_id: str
     group_id: str
 
+
 class ItemModifierGroupOut(ItemModifierGroupIn):
     pass
+
+
+# ---------- Bulk Insert Schemas ----------
+
+class VariantBulkIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    # item_id is inferred from parent
+    label: str = Field(min_length=1)
+    base_price: float = Field(..., ge=0)
+    mrp: Optional[float] = Field(None, ge=0)
+    is_default: bool = False
+
+class ItemBulkIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="ignore")
+    # category_id is inferred from parent
+    name: str = Field(min_length=1)
+    description: Optional[str] = None
+    sku: Optional[str] = None
+    hsn: Optional[str] = None
+    is_active: bool = True
+    stock_out: bool = False
+    tax_inclusive: bool = True
+    gst_rate: float = Field(5.0, ge=0, le=28)
+    kitchen_station_id: Optional[str] = None
+    # Nested variants
+    variants: Optional[List[VariantBulkIn]] = None
+
+class CategoryBulkIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="ignore")
+    # tenant_id, branch_id from context
+    name: str = Field(min_length=1)
+    position: int = Field(0, ge=0)
+    # Nested items
+    items: Optional[List[ItemBulkIn]] = None
+
+class BulkMenuIn(BaseModel):
+    categories: List[CategoryBulkIn]
