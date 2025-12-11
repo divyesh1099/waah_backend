@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 from fastapi import UploadFile, HTTPException
 from app.config import settings
+from app.util import r2_client
 
 _ALLOWED_IMAGE_CT: set[str] = {
     "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"
@@ -22,6 +23,24 @@ def _slugify(name: str) -> str:
         return f"{safe_base}.{ext}" if ext else safe_base
     return safe_base
 
+async def _save_to_r2(file: UploadFile, *, subdir: str) -> str:
+    """
+    Upload to Cloudflare R2 (S3-compatible). Assumes validation already done.
+    """
+    # Reset pointer in case something read it earlier
+    try:
+        file.file.seek(0)
+    except Exception:
+        pass
+
+    return await r2_client.upload_fileobj(
+        fileobj=file.file,
+        filename=file.filename or "upload",
+        content_type=file.content_type,
+        subdir=subdir,
+    )
+
+
 async def save_image_upload(
     file: UploadFile,
     *,
@@ -30,8 +49,7 @@ async def save_image_upload(
     max_bytes: int = 8 * 1024 * 1024,  # 8 MB
 ) -> str:
     """
-    Save `UploadFile` under MEDIA_ROOT/<subdir>/ and return the URL path
-    rooted at MEDIA_URL_BASE (e.g. "/media/items/xyz.jpg").
+    Save `UploadFile` under MEDIA_ROOT/<subdir>/ (or R2 if configured) and return the URL path.
     """
     ct = (file.content_type or "").lower()
     allowed = set(allowed_types or _ALLOWED_IMAGE_CT)
@@ -46,6 +64,10 @@ async def save_image_upload(
     except Exception:
         pass
 
+    if r2_client.is_enabled():
+        return await _save_to_r2(file, subdir=subdir)
+
+    # Fallback: local filesystem
     media_root: Path = Path(settings.MEDIA_ROOT).resolve()
     folder = (media_root / subdir).resolve()
     folder.mkdir(parents=True, exist_ok=True)

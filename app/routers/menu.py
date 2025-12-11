@@ -9,8 +9,6 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
-import os
 
 from app.db import get_db
 from app.schemas.menu import (
@@ -32,13 +30,9 @@ from app.models.core import (
     ItemModifierGroup,
 )
 from app.deps import AuthCtx, require_auth, require_perm
+from app.util.media import save_image_upload
 
 router = APIRouter(prefix="/menu", tags=["menu"])
-
-# Where we'll drop uploaded images.
-# Adjust this to match whatever you're already serving statically.
-MEDIA_ROOT = Path("media")
-MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 # ---------- helpers ----------
@@ -183,29 +177,15 @@ def _effective_branch_id(
     return bid
 
 
-def _save_upload_and_get_url(
+async def _save_upload_and_get_url(
     subdir: str,
     obj_id: str,
     upload: UploadFile,
 ) -> str:
     """
-    Save an UploadFile under media/<subdir>/ and return a URL-ish string
-    like "/media/<subdir>/<filename>". You can swap this for S3, etc.
+    Save an UploadFile under storage backend and return a URL that can be stored in image_url.
     """
-    safe_name = Path(upload.filename or "upload.bin").name
-    dest_dir = MEDIA_ROOT / subdir
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    dest_name = f"{obj_id}_{safe_name}"
-    dest_path = dest_dir / dest_name
-
-    # Write file bytes
-    data = upload.file.read()
-    with open(dest_path, "wb") as f:
-        f.write(data)
-
-    # Return something the frontend can stick in `image_url`
-    return f"/media/{subdir}/{dest_name}"
+    return await save_image_upload(upload, subdir=f"{subdir}/{obj_id}")
 
 
 # -----------------------------------------------------------------------------
@@ -766,7 +746,7 @@ def get_item_modifier_groups_full(
 # -----------------------------------------------------------------------------
 
 @router.post("/items/{item_id}/image")
-def upload_item_image(
+async def upload_item_image(
     item_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -778,7 +758,7 @@ def upload_item_image(
     """
     it = _ensure_item_access(db, item_id, ctx)
 
-    img_url = _save_upload_and_get_url("items", item_id, file)
+    img_url = await _save_upload_and_get_url("items", item_id, file)
     it.image_url = img_url
     db.commit()
     return {"image_url": img_url}
@@ -897,7 +877,7 @@ def bulk_insert_menu(
 
 
 @router.post("/variants/{variant_id}/image")
-def upload_variant_image(
+async def upload_variant_image(
     variant_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -913,7 +893,7 @@ def upload_variant_image(
 
     _ensure_item_access(db, v.item_id, ctx)
 
-    img_url = _save_upload_and_get_url("variants", variant_id, file)
+    img_url = await _save_upload_and_get_url("variants", variant_id, file)
     v.image_url = img_url
     db.commit()
     return {"image_url": img_url}

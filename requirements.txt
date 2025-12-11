@@ -3,6 +3,7 @@ annotated-types==0.7.0
 anyio==4.11.0
 argon2-cffi==23.1.0
 argon2-cffi-bindings==25.1.0
+boto3==1.35.70
 certifi==2025.10.5
 cffi==2.0.0
 charset-normalizer==3.4.4
