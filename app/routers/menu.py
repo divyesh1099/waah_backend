@@ -168,10 +168,13 @@ def _effective_branch_id(
 ) -> str:
     """
     Decide which branch to use:
-      - If token has ctx.branch_id => use it.
-      - Else, require caller to provide branch_id and verify it belongs to ctx.tenant_id.
+      - Caller-provided branch_id (query/body) wins if present.
+      - Otherwise fall back to branch_id embedded in the auth token.
+      - In either case, ensure the branch belongs to the caller's tenant.
     """
-    bid = (ctx.branch_id or (provided_branch_id or "").strip())
+    requested_bid = (provided_branch_id or "").strip()
+    ctx_bid = (ctx.branch_id or "").strip()
+    bid = requested_bid or ctx_bid
     if not bid:
         raise HTTPException(status_code=400, detail="branch not selected")
     br = db.get(Branch, bid)
