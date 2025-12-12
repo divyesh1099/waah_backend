@@ -19,17 +19,28 @@ def is_enabled() -> bool:
     ])
 
 
+
+# Global client cache
+_client_instance = None
+
 def _client():
-    """Lazily construct the R2 S3-compatible client."""
+    """Lazily construct the R2 S3-compatible client with caching."""
+    global _client_instance
+    
     if not is_enabled():
         raise RuntimeError("R2 is not configured")
+        
+    if _client_instance:
+        return _client_instance
+
     session = boto3.session.Session()
-    return session.client(
+    _client_instance = session.client(
         service_name="s3",
         endpoint_url=f"https://{settings.R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
         aws_access_key_id=settings.R2_ACCESS_KEY_ID,
         aws_secret_access_key=settings.R2_SECRET_ACCESS_KEY,
     )
+    return _client_instance
 
 
 def _safe_ext(name: str) -> str:

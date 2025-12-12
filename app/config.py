@@ -1,6 +1,8 @@
 # app/config.py
 import os
 from pathlib import Path
+from typing import Any
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -21,7 +23,17 @@ class Settings(BaseSettings):
     R2_SECRET_ACCESS_KEY: str | None = None
     R2_PUBLIC_BASE_URL: str | None = None
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+    )
+
+    @model_validator(mode='before')
+    @classmethod
+    def strip_strings(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {k: (v.strip() if isinstance(v, str) else v) for k, v in data.items()}
+        return data
 
 settings = Settings()
 

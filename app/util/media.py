@@ -33,12 +33,16 @@ async def _save_to_r2(file: UploadFile, *, subdir: str) -> str:
     except Exception:
         pass
 
-    return await r2_client.upload_fileobj(
-        fileobj=file.file,
-        filename=file.filename or "upload",
-        content_type=file.content_type,
-        subdir=subdir,
-    )
+    try:
+        return await r2_client.upload_fileobj(
+            fileobj=file.file,
+            filename=file.filename or "upload",
+            content_type=file.content_type,
+            subdir=subdir,
+        )
+    except Exception as exc:
+        # Bubble up a clear error instead of a silent 500
+        raise HTTPException(status_code=502, detail=f"R2 upload failed: {exc}") from exc
 
 
 async def save_image_upload(
@@ -65,7 +69,17 @@ async def save_image_upload(
         pass
 
     if r2_client.is_enabled():
-        return await _save_to_r2(file, subdir=subdir)
+        try:
+            return await _save_to_r2(file, subdir=subdir)
+        except Exception as e:
+            # Check if it's an HTTP exception already (bubbled from _save_to_r2 or elsewhere)
+            if isinstance(e, HTTPException):
+                raise e
+            # Otherwise log it and raise a 502/500 so the user knows it's the storage backend
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"R2 Upload Error: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=502, detail=f"Image storage backend failed: {str(e)}")
 
     # Fallback: local filesystem
     media_root: Path = Path(settings.MEDIA_ROOT).resolve()
