@@ -9,6 +9,7 @@ from fastapi import (
     Query,
 )
 from app.util.media import save_image_upload
+from app.util import r2_client
 
 # IMPORTANT: prefix is now "/media" not "/api/media"
 router = APIRouter(prefix="/media", tags=["media"])
@@ -38,3 +39,11 @@ async def upload_image(
 
     # Flutter expects 'path'
     return {"path": url_path}
+
+
+@router.get("/r2/status")
+async def r2_status():
+    """
+    Quick R2 connectivity check (does NOT leak secrets).
+    """
+    return await r2_client.check_health()

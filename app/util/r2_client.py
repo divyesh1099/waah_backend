@@ -84,3 +84,33 @@ async def upload_fileobj(
         return f"{base.rstrip('/')}/{key}"
     # fallback S3-style URL (bucket visibility dictates accessibility)
     return f"https://{settings.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/{settings.R2_BUCKET_NAME}/{key}"
+
+
+async def check_health() -> dict:
+    """
+    Lightweight health check for R2 config/credentials.
+    Tries a HEAD Bucket; does not list or create objects.
+    """
+    if not is_enabled():
+        return {"enabled": False, "ok": False, "error": "R2 not configured"}
+
+    def _head_bucket():
+        return _client().head_bucket(Bucket=settings.R2_BUCKET_NAME)
+
+    try:
+        await run_in_threadpool(_head_bucket)
+        return {
+            "enabled": True,
+            "ok": True,
+            "bucket": settings.R2_BUCKET_NAME,
+            "account": settings.R2_ACCOUNT_ID,
+            "public_base_url": settings.R2_PUBLIC_BASE_URL,
+        }
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "ok": False,
+            "error": str(exc),
+            "bucket": settings.R2_BUCKET_NAME,
+            "account": settings.R2_ACCOUNT_ID,
+        }

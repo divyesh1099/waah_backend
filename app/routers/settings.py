@@ -5,9 +5,6 @@ app/routers/settings.py — DROP-IN (2025-11-01)
 • Preserves existing endpoints and shapes. Backward compatible.
 """
 
-import os
-import shutil
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -23,6 +20,7 @@ from app.models.core import (
     ChargeMode,
 )
 from app.config import settings
+from app.util.media import save_image_upload
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -589,7 +587,7 @@ def list_stations(
 # ---------------------------------------------------------------------
 
 @router.post("/restaurant/logo")
-def upload_restaurant_logo(
+async def upload_restaurant_logo(
     tenant_id: str = Form(...),
     branch_id: str = Form(...),
     file: UploadFile = File(...),
@@ -605,16 +603,11 @@ def upload_restaurant_logo(
     if file.content_type not in allowed_types:
         raise HTTPException(400, detail="Only PNG or JPEG allowed")
 
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in [".png", ".jpg", ".jpeg"]:
-        ext = ".png" if file.content_type == "image/png" else ".jpg"
-
-    unique = f"logo_{tenant_id}_{branch_id}_{uuid.uuid4().hex}{ext}"
-    abs_path = os.path.join(cfg.MEDIA_ROOT, unique)
-    with open(abs_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    public_url = f"{cfg.MEDIA_URL_BASE}/{unique}"
+    public_url = await save_image_upload(
+        file,
+        subdir=f"logos/{tenant_id}/{branch_id}",
+        allowed_types=allowed_types,
+    )
 
     rs = (
         db.query(RestaurantSettings)

@@ -2,13 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime
-import os
-import shutil
-import uuid
 
 from app.db import get_db
 from app.config import settings
 from app.util.security import hash_pw
+from app.util.media import save_image_upload
 from app.models.core import (
     Tenant, Branch, User, RestaurantSettings,
     Printer, PrinterType, KitchenStation,
@@ -194,7 +192,7 @@ def upsert_branch_settings(
     return {"restaurant_settings_id": rs.id, "next": "PRINTERS"}
 
 @router.post("/logo")
-def upload_logo(
+async def upload_logo(
     request: Request,
     tenant_id: str = Form(...),
     branch_id: str = Form(...),
@@ -211,16 +209,11 @@ def upload_logo(
     if file.content_type not in allowed_types:
         raise HTTPException(400, detail="Only PNG or JPEG allowed")
 
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in [".png", ".jpg", ".jpeg"]:
-        ext = ".png" if file.content_type == "image/png" else ".jpg"
-
-    unique = f"logo_{tenant_id}_{branch_id}_{uuid.uuid4().hex}{ext}"
-    abs_path = os.path.join(settings.MEDIA_ROOT, unique)
-    with open(abs_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    public_url = f"{settings.MEDIA_URL_BASE}/{unique}"
+    public_url = await save_image_upload(
+        file,
+        subdir=f"logos/{tenant_id}/{branch_id}",
+        allowed_types=allowed_types,
+    )
 
     rs = (
         db.query(RestaurantSettings)
