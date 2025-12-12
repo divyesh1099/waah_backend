@@ -626,3 +626,32 @@ async def upload_restaurant_logo(
         db.refresh(rs)
 
     return {"logo_url": public_url}
+
+
+@router.get("/debug-r2")
+async def debug_r2_status(
+    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Debug endpoint to check R2 connectivity and config.
+    Only accessible to admins (SETTINGS_EDIT).
+    """
+    from app.util import r2_client
+    from app.config import settings as cfg
+    
+    status = await r2_client.check_health()
+    
+    # Add some config context (masked)
+    config_state = {
+        "account_id_configured": bool(cfg.R2_ACCOUNT_ID),
+        "bucket_configured": bool(cfg.R2_BUCKET_NAME),
+        "access_key_configured": bool(cfg.R2_ACCESS_KEY_ID),
+        "secret_configured": bool(cfg.R2_SECRET_ACCESS_KEY),
+        "account_id_preview": f"{cfg.R2_ACCOUNT_ID[:4]}..." if cfg.R2_ACCOUNT_ID else None,
+        "bucket_name": cfg.R2_BUCKET_NAME,
+    }
+    
+    return {
+        "config": config_state,
+        "connectivity_check": status
+    }
