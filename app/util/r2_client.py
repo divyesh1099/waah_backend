@@ -100,19 +100,30 @@ async def upload_fileobj(
 async def check_health() -> dict:
     """
     Lightweight health check for R2 config/credentials.
-    Tries a HEAD Bucket; does not list or create objects.
+    Tries a HEAD Bucket (Read) and PUT object (Write).
     """
     if not is_enabled():
         return {"enabled": False, "ok": False, "error": "R2 not configured"}
 
-    def _head_bucket():
-        return _client().head_bucket(Bucket=settings.R2_BUCKET_NAME)
+    def _sync_check():
+        client = _client()
+        # 1. Check Bucket Access (Read)
+        client.head_bucket(Bucket=settings.R2_BUCKET_NAME)
+        
+        # 2. Check Object Write (Write)
+        client.put_object(
+            Bucket=settings.R2_BUCKET_NAME,
+            Key="r2_health_check_test.txt",
+            Body=b"ok"
+        )
+        return True
 
     try:
-        await run_in_threadpool(_head_bucket)
+        await run_in_threadpool(_sync_check)
         return {
             "enabled": True,
             "ok": True,
+            "write_ok": True,
             "bucket": settings.R2_BUCKET_NAME,
             "account": settings.R2_ACCOUNT_ID,
             "public_base_url": settings.R2_PUBLIC_BASE_URL,
@@ -121,7 +132,9 @@ async def check_health() -> dict:
         return {
             "enabled": True,
             "ok": False,
+            "write_ok": False,
             "error": str(exc),
+            "error_type": type(exc).__name__,
             "bucket": settings.R2_BUCKET_NAME,
             "account": settings.R2_ACCOUNT_ID,
         }
