@@ -630,12 +630,15 @@ async def upload_restaurant_logo(
 
 @router.get("/debug-r2")
 async def debug_r2_status(
-    sub: str = Depends(require_perm("SETTINGS_EDIT")),
+    key: str = "",
 ):
     """
     Debug endpoint to check R2 connectivity and config.
-    Only accessible to admins (SETTINGS_EDIT).
+    Protected by simple key for browser access: ?key=waah_r2_debug
     """
+    if key != "waah_r2_debug":
+        raise HTTPException(status_code=401, detail="Invalid debug key")
+
     from app.util import r2_client
     from app.config import settings as cfg
     
