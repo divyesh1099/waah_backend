@@ -781,29 +781,6 @@ def delete_item_image(
     db.commit()
     return {"ok": True}
 
-
-# -----------------------------------------------------------------------------
-# BULK INSERT
-# -----------------------------------------------------------------------------
-
-@router.post("/bulk")
-def bulk_insert_menu(
-    body: BulkMenuIn,
-    tenant_id: Optional[str] = None,
-    branch_id: Optional[str] = None,
-    db: Session = Depends(get_db),
-    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
-):
-    """
-    Bulk insert categories, items, and variants.
-    Transactional: if any part fails, changes are rolled back (by FastAPI/SQLAlchemy default behavior on exception).
-    """
-    # 1. Resolve branch
-    eff_branch = _effective_branch_id(db, ctx, branch_id)
-
-    # 2. Iterate and Insert
-    # We will just append new objects. No sophisticated dedup logic for now.
-    
     import logging
     logger = logging.getLogger("uvicorn.error")
 
