@@ -1091,6 +1091,7 @@ async def upload_menu_csv(
             is_default=make_default,
         )
         db.add(v)
+        db.flush()  # ensure v.id is populated
         created_vars += 1
         sync_events.append(
             SyncEvent(
@@ -1114,8 +1115,11 @@ async def upload_menu_csv(
 
     db.commit()
     if sync_events:
-        db.bulk_save_objects(sync_events)
-        db.commit()
+        # ensure all SyncEvents have entity_id; skip invalid ones
+        sync_events = [ev for ev in sync_events if ev.entity_id]
+        if sync_events:
+            db.bulk_save_objects(sync_events)
+            db.commit()
     return {
         "ok": True,
         "created": {
