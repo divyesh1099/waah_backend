@@ -7,7 +7,7 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import csv
 import io
@@ -30,6 +30,7 @@ from app.models.core import (
     ModifierGroup,
     Modifier,
     ItemModifierGroup,
+    SyncEvent,
 )
 from app.deps import AuthCtx, require_auth, require_perm
 from app.util.media import save_image_upload
@@ -955,9 +956,15 @@ async def upload_menu_csv(
     created_cats = 0
     created_items = 0
     created_vars = 0
+    sync_events: list[SyncEvent] = []
 
     cat_cache: dict[str, MenuCategory] = {}
     item_cache: dict[tuple[str, str], MenuItem] = {}
+    item_has_default: dict[str, bool] = {}
+
+    def _dumps(obj: Any) -> str:
+        import json
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
 
     for row in reader:
         # Normalize keys
@@ -994,6 +1001,23 @@ async def upload_menu_csv(
             db.add(cat)
             db.flush()
             created_cats += 1
+            sync_events.append(
+                SyncEvent(
+                    entity="menu_category",
+                    entity_id=cat.id,
+                    op="UPSERT",
+                    payload=_dumps({
+                        "id": cat.id,
+                        "tenant_id": ctx.tenant_id,
+                        "branch_id": eff_branch,
+                        "name": cat.name,
+                        "position": cat.position or 0,
+                    }),
+                    device_id="server",
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
         cat_cache[cat_name.lower()] = cat
 
         # Item lookup/create by (category, name)
@@ -1027,20 +1051,70 @@ async def upload_menu_csv(
             db.add(it)
             db.flush()
             created_items += 1
+            sync_events.append(
+                SyncEvent(
+                    entity="menu_item",
+                    entity_id=it.id,
+                    op="UPSERT",
+                    payload=_dumps({
+                        "id": it.id,
+                        "tenant_id": ctx.tenant_id,
+                        "category_id": it.category_id,
+                        "name": it.name,
+                        "description": it.description,
+                        "sku": it.sku,
+                        "hsn": it.hsn,
+                        "is_active": it.is_active,
+                        "stock_out": it.stock_out,
+                        "tax_inclusive": it.tax_inclusive,
+                        "gst_rate": float(it.gst_rate or 0.0),
+                        "kitchen_station_id": it.kitchen_station_id,
+                        "image_url": it.image_url,
+                    }),
+                    device_id="server",
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            item_has_default[it.id] = False
         item_cache[item_key] = it
 
         # Variant create (always add; no dedup by label to keep simple)
+        make_default = not item_has_default.get(it.id, False)
+        item_has_default[it.id] = True
         v = ItemVariant(
             item_id=it.id,
             label=variant_label,
             base_price=_to_float(price_val, 0.0),
             mrp=_to_float(r.get("mrp"), 0.0),
-            is_default=False,
+            is_default=make_default,
         )
         db.add(v)
         created_vars += 1
+        sync_events.append(
+            SyncEvent(
+                entity="item_variant",
+                entity_id=v.id,
+                op="UPSERT",
+                payload=_dumps({
+                    "id": v.id,
+                    "item_id": v.item_id,
+                    "label": v.label,
+                    "base_price": float(v.base_price or 0.0),
+                    "mrp": float(v.mrp or 0.0),
+                    "is_default": v.is_default,
+                    "image_url": getattr(v, "image_url", None),
+                }),
+                device_id="server",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
 
     db.commit()
+    if sync_events:
+        db.bulk_save_objects(sync_events)
+        db.commit()
     return {
         "ok": True,
         "created": {
