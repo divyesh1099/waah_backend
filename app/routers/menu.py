@@ -6,7 +6,7 @@ from fastapi import (
     File,
 )
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Any
 from datetime import datetime, timezone
 from decimal import Decimal
 import csv
@@ -1047,6 +1047,7 @@ async def upload_menu_csv(
                 tax_inclusive=_to_bool(r.get("tax_inclusive"), True),
                 gst_rate=_to_float(r.get("gst_rate"), 0.0),
                 kitchen_station_id=None,
+                image_url=r.get("image_url"),
             )
             db.add(it)
             db.flush()
