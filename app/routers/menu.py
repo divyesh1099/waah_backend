@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 from decimal import Decimal
+import csv
+import io
 
 from app.db import get_db
 from app.schemas.menu import (
@@ -895,3 +897,157 @@ def delete_variant_image(
     v.image_url = None
     db.commit()
     return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
+# BULK CSV UPLOAD (server-side, faster than old client parsing)
+# -----------------------------------------------------------------------------
+
+@router.post("/upload-csv")
+async def upload_menu_csv(
+    file: UploadFile = File(...),
+    branch_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Upload a CSV and create categories/items/variants server-side.
+    Expected columns (case-insensitive):
+    - category (required)
+    - name (required)
+    - variant_label (required)
+    - price (required)
+    Optional: description, gst_rate, tax_inclusive, is_active, mrp, sku, hsn, image_url
+    """
+    # Resolve branch and tenant scope
+    eff_branch = _effective_branch_id(db, ctx, branch_id)
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    headers = [h.strip().lower() for h in (reader.fieldnames or [])]
+    required = {"category", "name", "variant_label", "price"}
+    if not required.issubset(set(headers)):
+        missing = required.difference(set(headers))
+        raise HTTPException(400, detail=f"Missing required columns: {', '.join(sorted(missing))}")
+
+    # Helpers
+    def _to_bool(s: str | None, default: bool = True) -> bool:
+        if s is None:
+            return default
+        v = s.strip().lower()
+        if v in ("", "null"):
+            return default
+        return v in ("1", "true", "yes", "y")
+
+    def _to_float(s: str | None, default: float = 0.0) -> float:
+        if s is None or not s.strip():
+            return default
+        try:
+            return float(s)
+        except Exception:
+            return default
+
+    created_cats = 0
+    created_items = 0
+    created_vars = 0
+
+    cat_cache: dict[str, MenuCategory] = {}
+    item_cache: dict[tuple[str, str], MenuItem] = {}
+
+    for row in reader:
+        # Normalize keys
+        r = {k.strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
+        cat_name = (r.get("category") or "").strip()
+        item_name = (r.get("name") or "").strip()
+        variant_label = (r.get("variant_label") or "").strip()
+        price_val = (r.get("price") or "").strip()
+
+        if not cat_name or not item_name or not variant_label or not price_val:
+            # skip incomplete rows
+            continue
+
+        # Category lookup/create
+        cat = cat_cache.get(cat_name.lower())
+        if not cat:
+            cat = (
+                db.query(MenuCategory)
+                .filter(
+                    MenuCategory.tenant_id == ctx.tenant_id,
+                    MenuCategory.branch_id == eff_branch,
+                    MenuCategory.name == cat_name,
+                    MenuCategory.deleted_at.is_(None),
+                )
+                .first()
+            )
+        if not cat:
+            cat = MenuCategory(
+                tenant_id=ctx.tenant_id,
+                branch_id=eff_branch,
+                name=cat_name,
+                position=0,
+            )
+            db.add(cat)
+            db.flush()
+            created_cats += 1
+        cat_cache[cat_name.lower()] = cat
+
+        # Item lookup/create by (category, name)
+        item_key = (cat.id, item_name.lower())
+        it = item_cache.get(item_key)
+        if not it:
+            it = (
+                db.query(MenuItem)
+                .filter(
+                    MenuItem.tenant_id == ctx.tenant_id,
+                    MenuItem.category_id == cat.id,
+                    MenuItem.name == item_name,
+                    MenuItem.deleted_at.is_(None),
+                )
+                .first()
+            )
+        if not it:
+            it = MenuItem(
+                tenant_id=ctx.tenant_id,
+                category_id=cat.id,
+                name=item_name,
+                description=r.get("description"),
+                sku=r.get("sku"),
+                hsn=r.get("hsn"),
+                is_active=_to_bool(r.get("is_active"), True),
+                stock_out=False,
+                tax_inclusive=_to_bool(r.get("tax_inclusive"), True),
+                gst_rate=_to_float(r.get("gst_rate"), 0.0),
+                kitchen_station_id=None,
+            )
+            db.add(it)
+            db.flush()
+            created_items += 1
+        item_cache[item_key] = it
+
+        # Variant create (always add; no dedup by label to keep simple)
+        v = ItemVariant(
+            item_id=it.id,
+            label=variant_label,
+            base_price=_to_float(price_val, 0.0),
+            mrp=_to_float(r.get("mrp"), 0.0),
+            is_default=False,
+        )
+        db.add(v)
+        created_vars += 1
+
+    db.commit()
+    return {
+        "ok": True,
+        "created": {
+            "categories": created_cats,
+            "items": created_items,
+            "variants": created_vars,
+        },
+        "branch_id": eff_branch,
+        "tenant_id": ctx.tenant_id,
+    }
