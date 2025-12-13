@@ -92,7 +92,8 @@ def _variant_payload(v: ItemVariant) -> dict:
 
 
 class ClearMenuRequest(BaseModel):
-    password: str
+    password: Optional[str] = None
+    pin: Optional[str] = None
     branch_id: Optional[str] = None
 
 
@@ -113,8 +114,18 @@ def clear_menu_danger(
     if not user or not bool(user.active):
         raise HTTPException(status_code=404, detail="user not found or inactive")
 
-    if not verify_pw(user.pass_hash, body.password):
-        raise HTTPException(status_code=400, detail="Invalid password")
+    pwd = (body.password or "").strip()
+    pin = (body.pin or "").strip()
+    if not pwd and not pin:
+        raise HTTPException(status_code=400, detail="Password or PIN required")
+
+    ok = False
+    if pwd:
+        ok = verify_pw(user.pass_hash, pwd)
+    if not ok and pin and getattr(user, "pin_hash", None):
+        ok = verify_pw(user.pin_hash, pin)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid password/PIN")
 
     eff_branch = _effective_branch_id(db, ctx, body.branch_id)
 
