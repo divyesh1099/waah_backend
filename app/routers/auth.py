@@ -53,6 +53,9 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
 
+class VerifyPasswordRequest(BaseModel):
+    password: str
+
 @router.post("/login", response_model=Token)
 def login(
     creds: LoginRequest,
@@ -240,4 +243,22 @@ def change_pin(
 
     u.pin_hash = hash_pw(body.new_pin)
     db.commit()
+    return {"ok": True}
+
+
+@router.post("/verify-password")
+def verify_password(
+    body: VerifyPasswordRequest,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_auth),
+):
+    """
+    Check that the supplied password matches the current user.
+    Used by clients to gate dangerous operations.
+    """
+    u: User | None = db.get(User, ctx.user_id)
+    if not u or not bool(u.active):
+        raise HTTPException(status_code=404, detail="user not found or inactive")
+    if not verify_pw(u.pass_hash, body.password):
+        raise HTTPException(status_code=400, detail="Invalid password")
     return {"ok": True}

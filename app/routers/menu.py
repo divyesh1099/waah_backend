@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import csv
 import io
+from pydantic import BaseModel
 
 from app.db import get_db
 from app.schemas.menu import (
@@ -31,9 +32,11 @@ from app.models.core import (
     Modifier,
     ItemModifierGroup,
     SyncEvent,
+    User,
 )
 from app.deps import AuthCtx, require_auth, require_perm
 from app.util.media import save_image_upload
+from app.util.security import verify_pw
 
 router = APIRouter(prefix="/menu", tags=["menu"])
 
@@ -85,6 +88,90 @@ def _variant_payload(v: ItemVariant) -> dict:
         "base_price": _as_float(v.base_price) or 0.0,
         "is_default": bool(v.is_default),
         "image_url": getattr(v, "image_url", None),
+    }
+
+
+class ClearMenuRequest(BaseModel):
+    password: str
+    branch_id: Optional[str] = None
+
+
+# -----------------------------------------------------------------------------
+# DANGER: Clear menu for this branch (requires password)
+# -----------------------------------------------------------------------------
+@router.post("/danger/clear-menu")
+def clear_menu_danger(
+    body: ClearMenuRequest,
+    db: Session = Depends(get_db),
+    ctx: AuthCtx = Depends(require_perm("SETTINGS_EDIT")),
+):
+    """
+    Danger action: delete ALL categories/items/variants for the effective branch.
+    Requires the current user's password.
+    """
+    user: User | None = db.get(User, ctx.user_id)
+    if not user or not bool(user.active):
+        raise HTTPException(status_code=404, detail="user not found or inactive")
+
+    if not verify_pw(user.pass_hash, body.password):
+        raise HTTPException(status_code=400, detail="Invalid password")
+
+    eff_branch = _effective_branch_id(db, ctx, body.branch_id)
+
+    cat_rows = (
+        db.query(MenuCategory.id)
+        .filter(MenuCategory.tenant_id == ctx.tenant_id)
+        .filter(MenuCategory.branch_id == eff_branch)
+        .all()
+    )
+    cat_ids = [r[0] if isinstance(r, tuple) else r.id for r in cat_rows]
+    if not cat_ids:
+        return {
+            "deleted_categories": 0,
+            "deleted_items": 0,
+            "deleted_variants": 0,
+            "branch_id": eff_branch,
+            "tenant_id": ctx.tenant_id,
+            "message": "No menu data for this branch",
+        }
+
+    item_rows = (
+        db.query(MenuItem.id)
+        .filter(MenuItem.category_id.in_(cat_ids))
+        .all()
+    )
+    item_ids = [r[0] if isinstance(r, tuple) else r.id for r in item_rows]
+
+    deleted_variants = 0
+    if item_ids:
+        deleted_variants = (
+            db.query(ItemVariant)
+              .filter(ItemVariant.item_id.in_(item_ids))
+              .delete(synchronize_session=False)
+        )
+
+    deleted_items = 0
+    if item_ids:
+        deleted_items = (
+            db.query(MenuItem)
+              .filter(MenuItem.id.in_(item_ids))
+              .delete(synchronize_session=False)
+        )
+
+    deleted_categories = (
+        db.query(MenuCategory)
+          .filter(MenuCategory.id.in_(cat_ids))
+          .delete(synchronize_session=False)
+    )
+
+    db.commit()
+
+    return {
+        "deleted_categories": deleted_categories,
+        "deleted_items": deleted_items,
+        "deleted_variants": deleted_variants,
+        "branch_id": eff_branch,
+        "tenant_id": ctx.tenant_id,
     }
 
 
